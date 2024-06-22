@@ -8,16 +8,16 @@ import (
 )
 
 type RenameTable struct {
-	DbId            int64  `json:"dbId"`
-	TableId         int64  `json:"tableId"`
-	IndexId         int64  `json:"indexId"`
-	ParititonId     int64  `json:"partitionId"`
-	NewTableName    string `json:"newTableName"`
-	OldTableName    string `json:"OldTableName"`
-	NewRollupName   string `json:"newRollupName"`
-	OldRollupName   string `json:"OldRollupName"`
-	NewParitionName string `json:"newPartitionName"`
-	OldParitionName string `json:"OldParitionName"`
+	DbId            int64  `json:"db"`
+	TableId         int64  `json:"tb"`
+	IndexId         int64  `json:"ind"`
+	ParititonId     int64  `json:"p"`
+	NewTableName    string `json:"nT"`
+	OldTableName    string `json:"oT"`
+	NewRollupName   string `json:"nR"`
+	OldRollupName   string `json:"oR"`
+	NewParitionName string `json:"nP"`
+	OldParitionName string `json:"oP"`
 }
 
 func NewRenameTableFromJson(data string) (*RenameTable, error) {

@@ -1139,13 +1139,23 @@ func (j *Job) handleRenameTable(binlog *festruct.TBinlog) error {
 		return err
 	}
 
-	srcTableId := renameTable.TableId
-	srcTableName, err := j.srcMeta.GetTableNameById(srcTableId)
-	if err != nil {
-		return err
+	var destTableName string
+	if j.SyncType == TableSync {
+		destTableName = j.Dest.Table
+	} else if j.SyncType == DBSync {
+		destTableId, err := j.getDestTableIdBySrc(renameTable.TableId)
+		if err != nil {
+			return err
+		}
+
+		if destTableName, err = j.destMeta.GetTableNameById(destTableId); err != nil {
+			return err
+		} else if destTableName == "" {
+			return xerror.Errorf(xerror.Normal, "tableId %d not found in destMeta", destTableId)
+		}
 	}
 
-	err = j.IDest.RenameTable(srcTableName, renameTable)
+	err = j.IDest.RenameTable(destTableName, renameTable)
 	return err
 }
 

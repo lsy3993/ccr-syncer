@@ -857,7 +857,7 @@ func (s *Spec) TruncateTable(destTableName string, truncateTable *record.Truncat
 	return s.DbExec(sql)
 }
 
-func (s *Spec) RenameTable(srcTableName string, renameTable *record.RenameTable) error {
+func (s *Spec) RenameTable(destTableName string, renameTable *record.RenameTable) error {
 	// rename table may be 'rename table', 'rename rollup', 'rename partition' and 'rename column'
 	// todo rename column
 
@@ -870,13 +870,13 @@ func (s *Spec) RenameTable(srcTableName string, renameTable *record.RenameTable)
 	// ALTER TABLE example_table RENAME ROLLUP rollup1 rollup2;
 	// if rename rollup, table name is unchanged
 	if renameTable.NewRollupName != "" && renameTable.OldRollupName != "" {
-		sql = fmt.Sprintf("ALTER TABLE %s RENAME ROLLUP %s %s", srcTableName, renameTable.OldRollupName, renameTable.NewRollupName)
+		sql = fmt.Sprintf("ALTER TABLE %s RENAME ROLLUP %s %s", destTableName, renameTable.OldRollupName, renameTable.NewRollupName)
 	}
 
 	// ALTER TABLE example_table RENAME PARTITION p1 p2;
 	// if rename partition, table name is unchanged
 	if renameTable.NewParitionName != "" && renameTable.OldParitionName != "" {
-		sql = fmt.Sprintf("ALTER TABLE %s RENAME PARTITION %s %s;", srcTableName, renameTable.OldParitionName, renameTable.NewParitionName)
+		sql = fmt.Sprintf("ALTER TABLE %s RENAME PARTITION %s %s;", destTableName, renameTable.OldParitionName, renameTable.NewParitionName)
 	}
 
 	if sql == "" {
