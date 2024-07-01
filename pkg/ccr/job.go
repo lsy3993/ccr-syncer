@@ -1139,8 +1139,15 @@ func (j *Job) handleRenameTable(binlog *festruct.TBinlog) error {
 		return err
 	}
 
+	// if source table name is not equal with dest table name,
+	// no need to execute rename operator.
+	// so only consider TableSync, beacuse in DBSync, table name will be the same
 	var destTableName string
 	if j.SyncType == TableSync {
+		if j.Dest.Table != j.Src.Table {
+			log.Warnf("source table name is not the same with dest table name. just return")
+			return nil
+		}
 		destTableName = j.Dest.Table
 	} else if j.SyncType == DBSync {
 		destTableId, err := j.getDestTableIdBySrc(renameTable.TableId)
