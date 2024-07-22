@@ -2663,6 +2663,48 @@ func (p *TQueryOptions) FastRead(buf []byte) (int, error) {
 					goto SkipFieldError
 				}
 			}
+		case 119:
+			if fieldTypeId == thrift.BOOL {
+				l, err = p.FastReadField119(buf[offset:])
+				offset += l
+				if err != nil {
+					goto ReadFieldError
+				}
+			} else {
+				l, err = bthrift.Binary.Skip(buf[offset:], fieldTypeId)
+				offset += l
+				if err != nil {
+					goto SkipFieldError
+				}
+			}
+		case 120:
+			if fieldTypeId == thrift.BOOL {
+				l, err = p.FastReadField120(buf[offset:])
+				offset += l
+				if err != nil {
+					goto ReadFieldError
+				}
+			} else {
+				l, err = bthrift.Binary.Skip(buf[offset:], fieldTypeId)
+				offset += l
+				if err != nil {
+					goto SkipFieldError
+				}
+			}
+		case 121:
+			if fieldTypeId == thrift.BOOL {
+				l, err = p.FastReadField121(buf[offset:])
+				offset += l
+				if err != nil {
+					goto ReadFieldError
+				}
+			} else {
+				l, err = bthrift.Binary.Skip(buf[offset:], fieldTypeId)
+				offset += l
+				if err != nil {
+					goto SkipFieldError
+				}
+			}
 		case 1000:
 			if fieldTypeId == thrift.BOOL {
 				l, err = p.FastReadField1000(buf[offset:])
@@ -4227,6 +4269,48 @@ func (p *TQueryOptions) FastReadField118(buf []byte) (int, error) {
 	return offset, nil
 }
 
+func (p *TQueryOptions) FastReadField119(buf []byte) (int, error) {
+	offset := 0
+
+	if v, l, err := bthrift.Binary.ReadBool(buf[offset:]); err != nil {
+		return offset, err
+	} else {
+		offset += l
+
+		p.EnableMatchWithoutInvertedIndex = v
+
+	}
+	return offset, nil
+}
+
+func (p *TQueryOptions) FastReadField120(buf []byte) (int, error) {
+	offset := 0
+
+	if v, l, err := bthrift.Binary.ReadBool(buf[offset:]); err != nil {
+		return offset, err
+	} else {
+		offset += l
+
+		p.EnableFallbackOnMissingInvertedIndex = v
+
+	}
+	return offset, nil
+}
+
+func (p *TQueryOptions) FastReadField121(buf []byte) (int, error) {
+	offset := 0
+
+	if v, l, err := bthrift.Binary.ReadBool(buf[offset:]); err != nil {
+		return offset, err
+	} else {
+		offset += l
+
+		p.KeepCarriageReturn = v
+
+	}
+	return offset, nil
+}
+
 func (p *TQueryOptions) FastReadField1000(buf []byte) (int, error) {
 	offset := 0
 
@@ -4354,6 +4438,9 @@ func (p *TQueryOptions) FastWriteNocopy(buf []byte, binaryWriter bthrift.BinaryW
 		offset += p.fastWriteField115(buf[offset:], binaryWriter)
 		offset += p.fastWriteField116(buf[offset:], binaryWriter)
 		offset += p.fastWriteField117(buf[offset:], binaryWriter)
+		offset += p.fastWriteField119(buf[offset:], binaryWriter)
+		offset += p.fastWriteField120(buf[offset:], binaryWriter)
+		offset += p.fastWriteField121(buf[offset:], binaryWriter)
 		offset += p.fastWriteField1000(buf[offset:], binaryWriter)
 		offset += p.fastWriteField18(buf[offset:], binaryWriter)
 		offset += p.fastWriteField42(buf[offset:], binaryWriter)
@@ -4479,6 +4566,9 @@ func (p *TQueryOptions) BLength() int {
 		l += p.field116Length()
 		l += p.field117Length()
 		l += p.field118Length()
+		l += p.field119Length()
+		l += p.field120Length()
+		l += p.field121Length()
 		l += p.field1000Length()
 	}
 	l += bthrift.Binary.FieldStopLength()
@@ -5678,6 +5768,39 @@ func (p *TQueryOptions) fastWriteField118(buf []byte, binaryWriter bthrift.Binar
 	if p.IsSetSerdeDialect() {
 		offset += bthrift.Binary.WriteFieldBegin(buf[offset:], "serde_dialect", thrift.I32, 118)
 		offset += bthrift.Binary.WriteI32(buf[offset:], int32(p.SerdeDialect))
+
+		offset += bthrift.Binary.WriteFieldEnd(buf[offset:])
+	}
+	return offset
+}
+
+func (p *TQueryOptions) fastWriteField119(buf []byte, binaryWriter bthrift.BinaryWriter) int {
+	offset := 0
+	if p.IsSetEnableMatchWithoutInvertedIndex() {
+		offset += bthrift.Binary.WriteFieldBegin(buf[offset:], "enable_match_without_inverted_index", thrift.BOOL, 119)
+		offset += bthrift.Binary.WriteBool(buf[offset:], p.EnableMatchWithoutInvertedIndex)
+
+		offset += bthrift.Binary.WriteFieldEnd(buf[offset:])
+	}
+	return offset
+}
+
+func (p *TQueryOptions) fastWriteField120(buf []byte, binaryWriter bthrift.BinaryWriter) int {
+	offset := 0
+	if p.IsSetEnableFallbackOnMissingInvertedIndex() {
+		offset += bthrift.Binary.WriteFieldBegin(buf[offset:], "enable_fallback_on_missing_inverted_index", thrift.BOOL, 120)
+		offset += bthrift.Binary.WriteBool(buf[offset:], p.EnableFallbackOnMissingInvertedIndex)
+
+		offset += bthrift.Binary.WriteFieldEnd(buf[offset:])
+	}
+	return offset
+}
+
+func (p *TQueryOptions) fastWriteField121(buf []byte, binaryWriter bthrift.BinaryWriter) int {
+	offset := 0
+	if p.IsSetKeepCarriageReturn() {
+		offset += bthrift.Binary.WriteFieldBegin(buf[offset:], "keep_carriage_return", thrift.BOOL, 121)
+		offset += bthrift.Binary.WriteBool(buf[offset:], p.KeepCarriageReturn)
 
 		offset += bthrift.Binary.WriteFieldEnd(buf[offset:])
 	}
@@ -6887,6 +7010,39 @@ func (p *TQueryOptions) field118Length() int {
 	if p.IsSetSerdeDialect() {
 		l += bthrift.Binary.FieldBeginLength("serde_dialect", thrift.I32, 118)
 		l += bthrift.Binary.I32Length(int32(p.SerdeDialect))
+
+		l += bthrift.Binary.FieldEndLength()
+	}
+	return l
+}
+
+func (p *TQueryOptions) field119Length() int {
+	l := 0
+	if p.IsSetEnableMatchWithoutInvertedIndex() {
+		l += bthrift.Binary.FieldBeginLength("enable_match_without_inverted_index", thrift.BOOL, 119)
+		l += bthrift.Binary.BoolLength(p.EnableMatchWithoutInvertedIndex)
+
+		l += bthrift.Binary.FieldEndLength()
+	}
+	return l
+}
+
+func (p *TQueryOptions) field120Length() int {
+	l := 0
+	if p.IsSetEnableFallbackOnMissingInvertedIndex() {
+		l += bthrift.Binary.FieldBeginLength("enable_fallback_on_missing_inverted_index", thrift.BOOL, 120)
+		l += bthrift.Binary.BoolLength(p.EnableFallbackOnMissingInvertedIndex)
+
+		l += bthrift.Binary.FieldEndLength()
+	}
+	return l
+}
+
+func (p *TQueryOptions) field121Length() int {
+	l := 0
+	if p.IsSetKeepCarriageReturn() {
+		l += bthrift.Binary.FieldBeginLength("keep_carriage_return", thrift.BOOL, 121)
+		l += bthrift.Binary.BoolLength(p.KeepCarriageReturn)
 
 		l += bthrift.Binary.FieldEndLength()
 	}

@@ -1740,6 +1740,9 @@ type TQueryOptions struct {
 	EnableNoNeedReadDataOpt                  bool            `thrift:"enable_no_need_read_data_opt,116,optional" frugal:"116,optional,bool" json:"enable_no_need_read_data_opt,omitempty"`
 	ReadCsvEmptyLineAsNull                   bool            `thrift:"read_csv_empty_line_as_null,117,optional" frugal:"117,optional,bool" json:"read_csv_empty_line_as_null,omitempty"`
 	SerdeDialect                             TSerdeDialect   `thrift:"serde_dialect,118,optional" frugal:"118,optional,TSerdeDialect" json:"serde_dialect,omitempty"`
+	EnableMatchWithoutInvertedIndex          bool            `thrift:"enable_match_without_inverted_index,119,optional" frugal:"119,optional,bool" json:"enable_match_without_inverted_index,omitempty"`
+	EnableFallbackOnMissingInvertedIndex     bool            `thrift:"enable_fallback_on_missing_inverted_index,120,optional" frugal:"120,optional,bool" json:"enable_fallback_on_missing_inverted_index,omitempty"`
+	KeepCarriageReturn                       bool            `thrift:"keep_carriage_return,121,optional" frugal:"121,optional,bool" json:"keep_carriage_return,omitempty"`
 	DisableFileCache                         bool            `thrift:"disable_file_cache,1000,optional" frugal:"1000,optional,bool" json:"disable_file_cache,omitempty"`
 }
 
@@ -1844,6 +1847,9 @@ func NewTQueryOptions() *TQueryOptions {
 		EnableNoNeedReadDataOpt:                  true,
 		ReadCsvEmptyLineAsNull:                   false,
 		SerdeDialect:                             TSerdeDialect_DORIS,
+		EnableMatchWithoutInvertedIndex:          true,
+		EnableFallbackOnMissingInvertedIndex:     true,
+		KeepCarriageReturn:                       false,
 		DisableFileCache:                         false,
 	}
 }
@@ -1947,6 +1953,9 @@ func (p *TQueryOptions) InitDefault() {
 	p.EnableNoNeedReadDataOpt = true
 	p.ReadCsvEmptyLineAsNull = false
 	p.SerdeDialect = TSerdeDialect_DORIS
+	p.EnableMatchWithoutInvertedIndex = true
+	p.EnableFallbackOnMissingInvertedIndex = true
+	p.KeepCarriageReturn = false
 	p.DisableFileCache = false
 }
 
@@ -2931,6 +2940,33 @@ func (p *TQueryOptions) GetSerdeDialect() (v TSerdeDialect) {
 	return p.SerdeDialect
 }
 
+var TQueryOptions_EnableMatchWithoutInvertedIndex_DEFAULT bool = true
+
+func (p *TQueryOptions) GetEnableMatchWithoutInvertedIndex() (v bool) {
+	if !p.IsSetEnableMatchWithoutInvertedIndex() {
+		return TQueryOptions_EnableMatchWithoutInvertedIndex_DEFAULT
+	}
+	return p.EnableMatchWithoutInvertedIndex
+}
+
+var TQueryOptions_EnableFallbackOnMissingInvertedIndex_DEFAULT bool = true
+
+func (p *TQueryOptions) GetEnableFallbackOnMissingInvertedIndex() (v bool) {
+	if !p.IsSetEnableFallbackOnMissingInvertedIndex() {
+		return TQueryOptions_EnableFallbackOnMissingInvertedIndex_DEFAULT
+	}
+	return p.EnableFallbackOnMissingInvertedIndex
+}
+
+var TQueryOptions_KeepCarriageReturn_DEFAULT bool = false
+
+func (p *TQueryOptions) GetKeepCarriageReturn() (v bool) {
+	if !p.IsSetKeepCarriageReturn() {
+		return TQueryOptions_KeepCarriageReturn_DEFAULT
+	}
+	return p.KeepCarriageReturn
+}
+
 var TQueryOptions_DisableFileCache_DEFAULT bool = false
 
 func (p *TQueryOptions) GetDisableFileCache() (v bool) {
@@ -3266,6 +3302,15 @@ func (p *TQueryOptions) SetReadCsvEmptyLineAsNull(val bool) {
 func (p *TQueryOptions) SetSerdeDialect(val TSerdeDialect) {
 	p.SerdeDialect = val
 }
+func (p *TQueryOptions) SetEnableMatchWithoutInvertedIndex(val bool) {
+	p.EnableMatchWithoutInvertedIndex = val
+}
+func (p *TQueryOptions) SetEnableFallbackOnMissingInvertedIndex(val bool) {
+	p.EnableFallbackOnMissingInvertedIndex = val
+}
+func (p *TQueryOptions) SetKeepCarriageReturn(val bool) {
+	p.KeepCarriageReturn = val
+}
 func (p *TQueryOptions) SetDisableFileCache(val bool) {
 	p.DisableFileCache = val
 }
@@ -3380,6 +3425,9 @@ var fieldIDToName_TQueryOptions = map[int16]string{
 	116:  "enable_no_need_read_data_opt",
 	117:  "read_csv_empty_line_as_null",
 	118:  "serde_dialect",
+	119:  "enable_match_without_inverted_index",
+	120:  "enable_fallback_on_missing_inverted_index",
+	121:  "keep_carriage_return",
 	1000: "disable_file_cache",
 }
 
@@ -3817,6 +3865,18 @@ func (p *TQueryOptions) IsSetReadCsvEmptyLineAsNull() bool {
 
 func (p *TQueryOptions) IsSetSerdeDialect() bool {
 	return p.SerdeDialect != TQueryOptions_SerdeDialect_DEFAULT
+}
+
+func (p *TQueryOptions) IsSetEnableMatchWithoutInvertedIndex() bool {
+	return p.EnableMatchWithoutInvertedIndex != TQueryOptions_EnableMatchWithoutInvertedIndex_DEFAULT
+}
+
+func (p *TQueryOptions) IsSetEnableFallbackOnMissingInvertedIndex() bool {
+	return p.EnableFallbackOnMissingInvertedIndex != TQueryOptions_EnableFallbackOnMissingInvertedIndex_DEFAULT
+}
+
+func (p *TQueryOptions) IsSetKeepCarriageReturn() bool {
+	return p.KeepCarriageReturn != TQueryOptions_KeepCarriageReturn_DEFAULT
 }
 
 func (p *TQueryOptions) IsSetDisableFileCache() bool {
@@ -4709,6 +4769,30 @@ func (p *TQueryOptions) Read(iprot thrift.TProtocol) (err error) {
 		case 118:
 			if fieldTypeId == thrift.I32 {
 				if err = p.ReadField118(iprot); err != nil {
+					goto ReadFieldError
+				}
+			} else if err = iprot.Skip(fieldTypeId); err != nil {
+				goto SkipFieldError
+			}
+		case 119:
+			if fieldTypeId == thrift.BOOL {
+				if err = p.ReadField119(iprot); err != nil {
+					goto ReadFieldError
+				}
+			} else if err = iprot.Skip(fieldTypeId); err != nil {
+				goto SkipFieldError
+			}
+		case 120:
+			if fieldTypeId == thrift.BOOL {
+				if err = p.ReadField120(iprot); err != nil {
+					goto ReadFieldError
+				}
+			} else if err = iprot.Skip(fieldTypeId); err != nil {
+				goto SkipFieldError
+			}
+		case 121:
+			if fieldTypeId == thrift.BOOL {
+				if err = p.ReadField121(iprot); err != nil {
 					goto ReadFieldError
 				}
 			} else if err = iprot.Skip(fieldTypeId); err != nil {
@@ -5947,6 +6031,39 @@ func (p *TQueryOptions) ReadField118(iprot thrift.TProtocol) error {
 	p.SerdeDialect = _field
 	return nil
 }
+func (p *TQueryOptions) ReadField119(iprot thrift.TProtocol) error {
+
+	var _field bool
+	if v, err := iprot.ReadBool(); err != nil {
+		return err
+	} else {
+		_field = v
+	}
+	p.EnableMatchWithoutInvertedIndex = _field
+	return nil
+}
+func (p *TQueryOptions) ReadField120(iprot thrift.TProtocol) error {
+
+	var _field bool
+	if v, err := iprot.ReadBool(); err != nil {
+		return err
+	} else {
+		_field = v
+	}
+	p.EnableFallbackOnMissingInvertedIndex = _field
+	return nil
+}
+func (p *TQueryOptions) ReadField121(iprot thrift.TProtocol) error {
+
+	var _field bool
+	if v, err := iprot.ReadBool(); err != nil {
+		return err
+	} else {
+		_field = v
+	}
+	p.KeepCarriageReturn = _field
+	return nil
+}
 func (p *TQueryOptions) ReadField1000(iprot thrift.TProtocol) error {
 
 	var _field bool
@@ -6399,6 +6516,18 @@ func (p *TQueryOptions) Write(oprot thrift.TProtocol) (err error) {
 		}
 		if err = p.writeField118(oprot); err != nil {
 			fieldId = 118
+			goto WriteFieldError
+		}
+		if err = p.writeField119(oprot); err != nil {
+			fieldId = 119
+			goto WriteFieldError
+		}
+		if err = p.writeField120(oprot); err != nil {
+			fieldId = 120
+			goto WriteFieldError
+		}
+		if err = p.writeField121(oprot); err != nil {
+			fieldId = 121
 			goto WriteFieldError
 		}
 		if err = p.writeField1000(oprot); err != nil {
@@ -8494,6 +8623,63 @@ WriteFieldEndError:
 	return thrift.PrependError(fmt.Sprintf("%T write field 118 end error: ", p), err)
 }
 
+func (p *TQueryOptions) writeField119(oprot thrift.TProtocol) (err error) {
+	if p.IsSetEnableMatchWithoutInvertedIndex() {
+		if err = oprot.WriteFieldBegin("enable_match_without_inverted_index", thrift.BOOL, 119); err != nil {
+			goto WriteFieldBeginError
+		}
+		if err := oprot.WriteBool(p.EnableMatchWithoutInvertedIndex); err != nil {
+			return err
+		}
+		if err = oprot.WriteFieldEnd(); err != nil {
+			goto WriteFieldEndError
+		}
+	}
+	return nil
+WriteFieldBeginError:
+	return thrift.PrependError(fmt.Sprintf("%T write field 119 begin error: ", p), err)
+WriteFieldEndError:
+	return thrift.PrependError(fmt.Sprintf("%T write field 119 end error: ", p), err)
+}
+
+func (p *TQueryOptions) writeField120(oprot thrift.TProtocol) (err error) {
+	if p.IsSetEnableFallbackOnMissingInvertedIndex() {
+		if err = oprot.WriteFieldBegin("enable_fallback_on_missing_inverted_index", thrift.BOOL, 120); err != nil {
+			goto WriteFieldBeginError
+		}
+		if err := oprot.WriteBool(p.EnableFallbackOnMissingInvertedIndex); err != nil {
+			return err
+		}
+		if err = oprot.WriteFieldEnd(); err != nil {
+			goto WriteFieldEndError
+		}
+	}
+	return nil
+WriteFieldBeginError:
+	return thrift.PrependError(fmt.Sprintf("%T write field 120 begin error: ", p), err)
+WriteFieldEndError:
+	return thrift.PrependError(fmt.Sprintf("%T write field 120 end error: ", p), err)
+}
+
+func (p *TQueryOptions) writeField121(oprot thrift.TProtocol) (err error) {
+	if p.IsSetKeepCarriageReturn() {
+		if err = oprot.WriteFieldBegin("keep_carriage_return", thrift.BOOL, 121); err != nil {
+			goto WriteFieldBeginError
+		}
+		if err := oprot.WriteBool(p.KeepCarriageReturn); err != nil {
+			return err
+		}
+		if err = oprot.WriteFieldEnd(); err != nil {
+			goto WriteFieldEndError
+		}
+	}
+	return nil
+WriteFieldBeginError:
+	return thrift.PrependError(fmt.Sprintf("%T write field 121 begin error: ", p), err)
+WriteFieldEndError:
+	return thrift.PrependError(fmt.Sprintf("%T write field 121 end error: ", p), err)
+}
+
 func (p *TQueryOptions) writeField1000(oprot thrift.TProtocol) (err error) {
 	if p.IsSetDisableFileCache() {
 		if err = oprot.WriteFieldBegin("disable_file_cache", thrift.BOOL, 1000); err != nil {
@@ -8852,6 +9038,15 @@ func (p *TQueryOptions) DeepEqual(ano *TQueryOptions) bool {
 		return false
 	}
 	if !p.Field118DeepEqual(ano.SerdeDialect) {
+		return false
+	}
+	if !p.Field119DeepEqual(ano.EnableMatchWithoutInvertedIndex) {
+		return false
+	}
+	if !p.Field120DeepEqual(ano.EnableFallbackOnMissingInvertedIndex) {
+		return false
+	}
+	if !p.Field121DeepEqual(ano.KeepCarriageReturn) {
 		return false
 	}
 	if !p.Field1000DeepEqual(ano.DisableFileCache) {
@@ -9669,6 +9864,27 @@ func (p *TQueryOptions) Field117DeepEqual(src bool) bool {
 func (p *TQueryOptions) Field118DeepEqual(src TSerdeDialect) bool {
 
 	if p.SerdeDialect != src {
+		return false
+	}
+	return true
+}
+func (p *TQueryOptions) Field119DeepEqual(src bool) bool {
+
+	if p.EnableMatchWithoutInvertedIndex != src {
+		return false
+	}
+	return true
+}
+func (p *TQueryOptions) Field120DeepEqual(src bool) bool {
+
+	if p.EnableFallbackOnMissingInvertedIndex != src {
+		return false
+	}
+	return true
+}
+func (p *TQueryOptions) Field121DeepEqual(src bool) bool {
+
+	if p.KeepCarriageReturn != src {
 		return false
 	}
 	return true
