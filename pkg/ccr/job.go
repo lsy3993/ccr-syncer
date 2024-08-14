@@ -833,7 +833,7 @@ func (j *Job) ingestBinlog(txnId int64, tableRecords []*record.TableRecord) ([]*
 }
 
 // Table ingestBinlog for txn insert
-func (j *Job) ingestBinlogForTxnInsert(txnId int64, tableRecords []*record.TableRecord, stidMap map[int64]int64) ([]*festruct.TSubTxnInfo, error) {
+func (j *Job) ingestBinlogForTxnInsert(txnId int64, tableRecords []*record.TableRecord, stidMap map[int64]int64, destTableId int64) ([]*festruct.TSubTxnInfo, error) {
 	log.Infof("ingestBinlogForTxnInsert, txnId: %d", txnId)
 
 	job, err := j.jobFactory.CreateJob(NewIngestContextForTxnInsert(txnId, tableRecords, j.progress.TableMapping, stidMap), j, "IngestBinlog")
@@ -860,23 +860,9 @@ func (j *Job) ingestBinlogForTxnInsert(txnId int64, tableRecords []*record.Table
 			return nil, noCommitInfoErr
 		}
 
-		// only one table can execute txn insert
-		sourceTableRecord := tableRecords[0]
-		sourceTableId := sourceTableRecord.Id
-		if ingestBinlogJob.tableMapping == nil || len(ingestBinlogJob.tableMapping) == 0 {
-			noTableMappingErr := xerror.Errorf(xerror.Normal, "no table mapping when ingestBinlogJob is %v", ingestBinlogJob)
-			return nil, noTableMappingErr
-		}
-
-		descTableId := ingestBinlogJob.tableMapping[sourceTableId]
-		if descTableId == 0 {
-			noDescTableIdErr := xerror.Errorf(xerror.Normal, "no desc table id from tableMapping")
-			return nil, noDescTableIdErr
-		}
-
 		tSubTxnInfo := &festruct.TSubTxnInfo{
-			SubTxnId:          destStid,
-			TableId:           descTableId,
+			SubTxnId:          &destStid,
+			TableId:           &destTableId,
 			TabletCommitInfos: commitInfos,
 		}
 
@@ -1012,7 +998,7 @@ func (j *Job) handleUpsert(binlog *festruct.TBinlog) error {
 		var beginTxnResp *festruct.TBeginTxnResult_
 		if isTxnInsert {
 			// when txn insert, give an array length in BeginTransaction, it will return a list of stid
-			beginTxnResp, err = destRpc.BeginTransactionForTxnInsert(dest, label, inMemoryData.DestTableIds, len(sourceStids))
+			beginTxnResp, err = destRpc.BeginTransactionForTxnInsert(dest, label, inMemoryData.DestTableIds, int64(len(sourceStids)))
 		} else {
 			beginTxnResp, err = destRpc.BeginTransaction(dest, label, inMemoryData.DestTableIds)
 		}
@@ -1060,8 +1046,11 @@ func (j *Job) handleUpsert(binlog *festruct.TBinlog) error {
 
 		// Step 3: ingest binlog
 		if isTxnInsert {
-			// when txn insert, use subTxnInfos to commit rather than commitInfos
-			subTxnInfos, err := j.ingestBinlogForTxnInsert(txnId, tableRecords, stidMap)
+			// When txn insert, only one table can be inserted, so use the first DestTableId
+			destTableId := inMemoryData.DestTableIds[0]
+
+			// When txn insert, use subTxnInfos to commit rather than commitInfos.
+			subTxnInfos, err := j.ingestBinlogForTxnInsert(txnId, tableRecords, stidMap, destTableId)
 			if err != nil {
 				rollback(err, inMemoryData)
 				return err
@@ -2127,3 +2116,4 @@ func restoreSnapshotName(snapshotName string) string {
 	// use current seconds
 	return fmt.Sprintf("%s_r_%d", snapshotName, time.Now().Unix())
 }
+

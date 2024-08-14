@@ -571,7 +571,7 @@ func (rpc *singleFeClient) CommitTransactionForTxnInsert(spec *base.Spec, txnId 
 	req := &festruct.TCommitTxnRequest{}
 	setAuthInfo(req, spec)
 	req.TxnId = &txnId
-	req.TxnInsert = isTxnInsert
+	req.TxnInsert = &isTxnInsert
 	req.SubTxnInfos = subTxnInfos
 
 	if result, err := client.CommitTxn(context.Background(), req, callopt.WithRPCTimeout(commitTxnTimeout)); err != nil {

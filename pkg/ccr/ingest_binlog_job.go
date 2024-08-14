@@ -219,7 +219,8 @@ func (h *tabletIngestBinlogHandler) handle() {
 	h.ingestJob.appendCommitInfos(h.CommitInfos()...)
 	// for txn insert
 	if h.stid != 0 {
-		h.ingestJob.appendSubTxnCommitInfos(h.stid, h.SubTxnToCommitInfos()...)
+		commitInfos := h.SubTxnToCommitInfos()[h.stid]
+		h.ingestJob.appendSubTxnCommitInfos(h.stid, commitInfos...)
 	}
 }
 
@@ -685,3 +686,4 @@ func (j *IngestBinlogJob) Run() {
 		return
 	}
 }
+
