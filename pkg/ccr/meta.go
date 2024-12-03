@@ -596,7 +596,7 @@ func (m *Meta) GetBackends() ([]*base.Backend, error) {
 	if len(m.Backends) > 0 {
 		backends := make([]*base.Backend, 0, len(m.Backends))
 		for _, backend := range m.Backends {
-			backend := *backend	// copy
+			backend := *backend // copy
 			backends = append(backends, &backend)
 		}
 		if len(m.HostMapping) != 0 {

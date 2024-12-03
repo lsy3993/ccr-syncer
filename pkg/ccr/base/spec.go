@@ -622,7 +622,7 @@ func (s *Spec) CreateTableOrView(createTable *record.CreateTable, srcDatabase st
 
 	log.Infof("create table or view sql: %s", createSql)
 
-	list := []string {}
+	list := []string{}
 	if strings.Contains(createSql, "agg_state<") {
 		log.Infof("agg_state is exists in the create table sql, set enable_agg_state=true")
 		list = append(list, "SET enable_agg_state=true")
@@ -1154,7 +1154,7 @@ func (s *Spec) Exec(sql string) error {
 }
 
 // Db Exec sql
-func (s *Spec) DbExec(sqls ... string) error {
+func (s *Spec) DbExec(sqls ...string) error {
 	db, err := s.ConnectDB()
 	if err != nil {
 		return err
