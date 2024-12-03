@@ -1327,7 +1327,7 @@ func (j *Job) getDbSyncTableRecords(upsert *record.Upsert) []*record.TableRecord
 	return tableRecords
 }
 
-func (j *Job) getReleatedTableRecords(upsert *record.Upsert) ([]*record.TableRecord, error) {
+func (j *Job) getRelatedTableRecords(upsert *record.Upsert) ([]*record.TableRecord, error) {
 	var tableRecords []*record.TableRecord //, 0, len(upsert.TableRecords))
 
 	switch j.SyncType {
@@ -1510,7 +1510,7 @@ func (j *Job) handleUpsert(binlog *festruct.TBinlog) error {
 			isTxnInsert = true
 		}
 
-		tableRecords, err := j.getReleatedTableRecords(upsert)
+		tableRecords, err := j.getRelatedTableRecords(upsert)
 		if err != nil {
 			log.Errorf("get related table records failed, err: %+v", err)
 		}
