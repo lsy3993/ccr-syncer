@@ -1,6 +1,9 @@
 package storage
 
-import "errors"
+import (
+	"errors"
+	"flag"
+)
 
 var (
 	ErrJobExists    = errors.New("job exists")
@@ -8,10 +11,20 @@ var (
 )
 
 const (
-	InvalidCheckTimestamp int64  = -1
-	remoteDBName          string = "ccr"
-	maxOpenConnctions     int    = 20
+	InvalidCheckTimestamp    int64  = -1
+	remoteDBName             string = "ccr"
+	defaultMaxOpenConnctions int    = 20
 )
+
+var maxOpenConnctions int
+var maxAllowedPacket int64
+
+func init() {
+	flag.Int64Var(&maxAllowedPacket, "mysql_max_allowed_packet", defaultMaxAllowedPacket,
+		"Config the max allowed packet to send to mysql server, the upper limit is 1GB")
+	flag.IntVar(&maxOpenConnctions, "max_open_connection", defaultMaxOpenConnctions,
+		"Config the max open connections for db user")
+}
 
 type DB interface {
 	// Add ccr job

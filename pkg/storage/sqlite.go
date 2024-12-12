@@ -21,7 +21,7 @@ func NewSQLiteDB(dbPath string) (DB, error) {
 	}
 
 	db.SetMaxOpenConns(maxOpenConnctions)
-	db.SetMaxIdleConns(maxOpenConnctions / 2)
+	db.SetMaxIdleConns(maxOpenConnctions / 4)
 
 	// create table info && progress, if not exists
 	// all is tuple (string, string)

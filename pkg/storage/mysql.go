@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
-	"flag"
 	"fmt"
 	"time"
 
@@ -15,13 +14,6 @@ import (
 const (
 	defaultMaxAllowedPacket = 1024 * 1024 * 1024
 )
-
-var maxAllowedPacket int64
-
-func init() {
-	flag.Int64Var(&maxAllowedPacket, "mysql_max_allowed_packet", defaultMaxAllowedPacket,
-		"Config the max allowed packet to send to mysql server, the upper limit is 1GB")
-}
 
 type MysqlDB struct {
 	db *sql.DB
@@ -34,7 +26,7 @@ func NewMysqlDB(host string, port int, user string, password string) (DB, error)
 	}
 
 	dbForDDL.SetMaxOpenConns(maxOpenConnctions)
-	dbForDDL.SetMaxIdleConns(maxOpenConnctions / 2)
+	dbForDDL.SetMaxIdleConns(maxOpenConnctions / 4)
 
 	if _, err := dbForDDL.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", remoteDBName)); err != nil {
 		return nil, xerror.Wrapf(err, xerror.DB, "mysql: create database %s failed", remoteDBName)
@@ -47,7 +39,7 @@ func NewMysqlDB(host string, port int, user string, password string) (DB, error)
 	}
 
 	db.SetMaxOpenConns(maxOpenConnctions)
-	db.SetMaxIdleConns(maxOpenConnctions / 2)
+	db.SetMaxIdleConns(maxOpenConnctions / 4)
 
 	if _, err = db.Exec("CREATE TABLE IF NOT EXISTS jobs (`job_name` VARCHAR(512) PRIMARY KEY, `job_info` TEXT, `belong_to` VARCHAR(96))"); err != nil {
 		return nil, xerror.Wrap(err, xerror.DB, "mysql: create table jobs failed")
