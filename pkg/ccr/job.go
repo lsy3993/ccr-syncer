@@ -3117,6 +3117,7 @@ func (j *Job) Run() error {
 		isProgressExist, err = j.db.IsProgressExist(j.Name)
 		if err != nil {
 			log.Errorf("check progress exist failed, error: %+v", err)
+			time.Sleep(time.Second * time.Duration(i*2))
 			continue
 		}
 		break
