@@ -33,6 +33,9 @@ func NewMysqlDB(host string, port int, user string, password string) (DB, error)
 		return nil, xerror.Wrapf(err, xerror.DB, "mysql: open %s@tcp(%s:%s) failed", user, host, password)
 	}
 
+	dbForDDL.SetMaxOpenConns(maxOpenConnctions)
+	dbForDDL.SetMaxIdleConns(maxOpenConnctions / 2)
+
 	if _, err := dbForDDL.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", remoteDBName)); err != nil {
 		return nil, xerror.Wrapf(err, xerror.DB, "mysql: create database %s failed", remoteDBName)
 	}
@@ -42,6 +45,9 @@ func NewMysqlDB(host string, port int, user string, password string) (DB, error)
 	if err != nil {
 		return nil, xerror.Wrapf(err, xerror.DB, "mysql: open mysql in db %s@tcp(%s:%d)/%s failed", user, host, port, remoteDBName)
 	}
+
+	db.SetMaxOpenConns(maxOpenConnctions)
+	db.SetMaxIdleConns(maxOpenConnctions / 2)
 
 	if _, err = db.Exec("CREATE TABLE IF NOT EXISTS jobs (`job_name` VARCHAR(512) PRIMARY KEY, `job_info` TEXT, `belong_to` VARCHAR(96))"); err != nil {
 		return nil, xerror.Wrap(err, xerror.DB, "mysql: create table jobs failed")

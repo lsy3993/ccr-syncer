@@ -10,6 +10,7 @@ var (
 const (
 	InvalidCheckTimestamp int64  = -1
 	remoteDBName          string = "ccr"
+	maxOpenConnctions     int    = 20
 )
 
 type DB interface {
