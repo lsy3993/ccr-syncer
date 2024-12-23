@@ -50,7 +50,13 @@ var (
 func init() {
 	flag.BoolVar(&printVersion, "version", false, "The program's version")
 	flag.StringVar(&dbPath, "db_dir", "ccr.db", "sqlite3 db file")
-	flag.StringVar(&syncer.Config_file, "config_file", "db.conf", "meta data configuration")
+	flag.StringVar(&syncer.Db_type, "db_type", "sqlite3", "meta db type")
+	flag.StringVar(&syncer.Db_host, "db_host", "127.0.0.1", "meta db host")
+	flag.IntVar(&syncer.Db_port, "db_port", 3306, "meta db port")
+	flag.StringVar(&syncer.Db_user, "db_user", "root", "meta db user")
+	flag.StringVar(&syncer.Db_password, "db_password", "", "meta db password")
+	// default value of config_file is empty
+	flag.StringVar(&syncer.Config_file, "config_file", "", "meta data configuration")
 
 	flag.StringVar(&syncer.Host, "host", "127.0.0.1", "syncer host")
 	flag.IntVar(&syncer.Port, "port", 9190, "syncer port")
@@ -61,10 +67,14 @@ func init() {
 	utils.InitLog()
 }
 
-func parseConfigFile(syncer *Syncer) bool {
-	if syncer == nil && syncer.Config_file == "" {
-		log.Errorf("syncer is null or configFile name is empty")
+func (syncer *Syncer) parseConfigFile() bool {
+	if syncer == nil {
+		log.Errorf("syncer is null")
 		return false
+	}
+	if syncer.Config_file == "" {
+		log.Infof("config file is empty, use default value for db_host, db_port,db_user and db_password")
+		return true
 	}
 
 	file, err := os.Open(syncer.Config_file)
@@ -96,20 +106,20 @@ func parseConfigFile(syncer *Syncer) bool {
 
 		switch key {
 		case "db_type":
-			flag.StringVar(&syncer.Db_type, "db_type", value, "meta database type")
+			syncer.Db_type = value
 		case "db_host":
-			flag.StringVar(&syncer.Db_host, "db_host", value, "meta database host")
+			syncer.Db_host = value
 		case "db_port":
 			port, err := strconv.Atoi(value)
 			if err != nil {
 				log.Errorf("strconv convert strings to int failed")
 				continue
 			}
-			flag.IntVar(&syncer.Db_port, "db_port", port, "meta db port")
+			syncer.Db_port = port
 		case "db_user":
-			flag.StringVar(&syncer.Db_user, "db_user", value, "meta database user")
+			syncer.Db_user = value
 		case "db_password":
-			flag.StringVar(&syncer.Db_password, "db_password", value, "meta database password")
+			syncer.Db_password = value
 		default:
 			log.Warnf("invalid config, key : %s, value : %s", key, value)
 		}
@@ -145,7 +155,7 @@ func main() {
 		log.Fatal("db_dir is empty")
 	}
 	// check config
-	if parseConfigFile(&syncer) == false {
+	if syncer.parseConfigFile() == false {
 		log.Fatal("parseConfigFile failed, so exit")
 	}
 	var db storage.DB
@@ -257,3 +267,4 @@ func main() {
 	// Step 11: wait for all task done
 	wg.Wait()
 }
+

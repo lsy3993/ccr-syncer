@@ -18,17 +18,24 @@ usage() {
 Usage: $0 [options] [<value(s)>]
 Options:
     --daemon                    like doris' parameter, run deamon
-    --log_level <arg>           arg is one of [info|debug|trace]
-    --log_dir <arg>             arg is the path of ccr log
-    --db_dir <arg>              arg is the path of meta database
+    --log_level <arg>           one of [info|debug|trace]
+    --log_dir <arg>             the path of ccr log
+    --db_dir <arg>              the path of meta database
     --host <arg>                the host of ccr progress, default is 127.0.0.1
     --port <arg>                the port of ccr progress, default is 9190
     --pid_dir <arg>             the path of ccr progress id, default is ./bin/
-    --pprof <arg>               use pprof or not, arg is one of [true|false], defalut is false
+    --pprof <arg>               use pprof or not, arg is one of [true|false], defalut value is false
     --pprof_port <arg>          the port of pprof
     --connect_timeout <arg>     arg like 15s, default is 10s
     --rpc_timeout <arg>         arg like 10s, default is 3s
-    --config_file <arg>         the config file of ccr, which contains db_type,host,port,user and password, defalut config file name is db.conf
+    --config_file <arg>         the config file of ccr, which contains db_type,host,port,user and password, 
+                                defalut config file name is db.conf. If set config_file, the db_type, db_host,
+                                db_port, db_user, db_password should not be set.
+    --db_type <arg>             one of the [mysql|sqlite3|postgresql], defalut value is sqlite3
+    --db_host <arg>             the host of meta database
+    --db_port <arg>             the port of meta database
+    --db_user <arg>             the user name of meta database
+    --db_password <arg>         the password of meta database
 "
     exit 1
 }
@@ -41,7 +48,12 @@ OPTS="$(getopt \
     -l 'daemon' \
     -l 'log_level:' \
     -l 'log_dir:' \
+    -l 'db_type:' \
     -l 'db_dir:' \
+    -l 'db_host:' \
+    -l 'db_port:' \
+    -l 'db_user:' \
+    -l 'db_password:' \
     -l 'host:' \
     -l 'port:' \
     -l 'pid_dir:' \
@@ -59,11 +71,16 @@ HOST="127.0.0.1"
 PORT="9190"
 LOG_LEVEL=""
 DB_DIR="${SYNCER_HOME}/db/ccr.db"
+DB_TYPE="sqlite3"
+DB_HOST="127.0.0.1"
+DB_PORT="3306"
+DB_USER=""
+DB_PASSWORD=""
 PPROF="false"
 PPROF_PORT="6060"
 CONNECT_TIMEOUT="10s"
 RPC_TIMEOUT="30s"
-CONFIG_FILE="db.conf"
+CONFIG_FILE=""
 while true; do
     case "$1" in
     -h)
@@ -84,8 +101,28 @@ while true; do
         LOG_DIR=$2
         shift 2
         ;;
+    --db_type)
+        DB_TYPE=$2
+        shift 2
+        ;;
     --db_dir)
         DB_DIR=$2
+        shift 2
+        ;;
+    --db_host)
+        DB_HOST=$2
+        shift 2
+        ;;
+    --db_port)
+        DB_PORT=$2
+        shift 2
+        ;;
+    --db_user)
+        DB_USER=$2
+        shift 2
+        ;;
+    --db_password)
+        DB_PASSWORD=$2
         shift 2
         ;;
     --host)
@@ -154,12 +191,24 @@ if [[ -f "${pidfile}" ]]; then
     fi
 fi
 
+if [[ -n "${DB_USER}" ]]; then
+    if [[ "${DB_TYPE}" == "sqlite3" ]]; then
+        echo "sqlite3 is only for local for now"
+        exit 1
+    fi
+fi
+
 chmod 755 "${SYNCER_HOME}/bin/ccr_syncer"
 echo "start time: $(date)" >>"${LOG_DIR}"
 
 if [[ "${RUN_DAEMON}" -eq 1 ]]; then
     nohup "${SYNCER_HOME}/bin/ccr_syncer" \
           "-db_dir=${DB_DIR}" \
+          "-db_type=${DB_TYPE}" \
+          "-db_host=${DB_HOST}" \
+          "-db_port=${DB_PORT}" \
+          "-db_user=${DB_USER}" \
+          "-db_password=${DB_PASSWORD}" \
           "-config_file=${CONFIG_FILE}" \
           "-host=${HOST}" \
           "-port=${PORT}" \
@@ -174,6 +223,11 @@ if [[ "${RUN_DAEMON}" -eq 1 ]]; then
 else
     "${SYNCER_HOME}/bin/ccr_syncer" \
         "-db_dir=${DB_DIR}" \
+        "-db_type=${DB_TYPE}" \
+        "-db_host=${DB_HOST}" \
+        "-db_port=${DB_PORT}" \
+        "-db_user=${DB_USER}" \
+        "-db_password=${DB_PASSWORD}" \
         "-config_file=${CONFIG_FILE}" \
         "-host=${HOST}" \
         "-port=${PORT}" \
@@ -183,3 +237,4 @@ else
         "-rpc_timeout=${RPC_TIMEOUT}" \
         "-log_level=${LOG_LEVEL}" | tee -a "${LOG_DIR}"
 fi
+
