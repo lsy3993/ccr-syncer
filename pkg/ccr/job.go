@@ -91,7 +91,7 @@ func init() {
 		"compress the snapshot job info and meta")
 	flag.BoolVar(&featureSkipRollupBinlogs, "feature_skip_rollup_binlogs", false,
 		"skip the rollup related binlogs")
-	flag.BoolVar(&featureTxnInsert, "feature_txn_insert", true,
+	flag.BoolVar(&featureTxnInsert, "feature_txn_insert", false,
 		"enable txn insert support")
 	flag.BoolVar(&featureFilterStorageMedium, "feature_filter_storage_medium", true,
 		"enable filter storage medium property")
