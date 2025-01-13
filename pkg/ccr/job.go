@@ -1,3 +1,19 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License
 package ccr
 
 import (
@@ -32,7 +48,10 @@ import (
 )
 
 const (
-	SYNC_DURATION = time.Second * 3
+	SyncDuration = time.Second * 3
+
+	SkipBySilence  = "silence"
+	SkipByFullSync = "fullsync"
 )
 
 var (
@@ -46,6 +65,9 @@ var (
 	featureCompressedSnapshot           bool
 	featureSkipRollupBinlogs            bool
 	featureTxnInsert                    bool
+	featureFilterStorageMedium          bool
+
+	ErrMaterializedViewTable = xerror.NewWithoutStack(xerror.Meta, "Not support table type: materialized view")
 )
 
 func init() {
@@ -71,6 +93,8 @@ func init() {
 		"skip the rollup related binlogs")
 	flag.BoolVar(&featureTxnInsert, "feature_txn_insert", true,
 		"enable txn insert support")
+	flag.BoolVar(&featureFilterStorageMedium, "feature_filter_storage_medium", true,
+		"enable filter storage medium property")
 }
 
 type SyncType int
@@ -110,22 +134,32 @@ func (j JobState) String() string {
 	}
 }
 
-type Job struct {
-	SyncType  SyncType    `json:"sync_type"`
-	Name      string      `json:"name"`
-	Src       base.Spec   `json:"src"`
-	ISrc      base.Specer `json:"-"`
-	srcMeta   Metaer      `json:"-"`
-	Dest      base.Spec   `json:"dest"`
-	IDest     base.Specer `json:"-"`
-	destMeta  Metaer      `json:"-"`
-	SkipError bool        `json:"skip_error"`
-	State     JobState    `json:"state"`
-
-	factory *Factory `json:"-"`
+type JobExtra struct {
+	// Reuse the upstream txn label as the downstream txn label.
+	ReuseBinlogLabel bool `json:"reuse_binlog_label,omitempty"`
 
 	allowTableExists bool `json:"-"` // Only for FirstRun(), don't need to persist.
-	forceFullsync    bool `json:"-"` // Force job step fullsync, for test only.
+
+	// Skip a specified binlog or binlogs, don't need to persist.
+	// if the SkipCommitSeq is not specified, trigger a fullsync unconditionally.
+	SkipBinlog    bool   `json:"skip_binlog,omitempty"`
+	SkipCommitSeq int64  `json:"skip_commit_seq,omitempty"`
+	SkipBy        string `json:"skip_by,omitempty"`
+}
+
+type Job struct {
+	Name     string      `json:"name"`
+	SyncType SyncType    `json:"sync_type"`
+	Src      base.Spec   `json:"src"`
+	ISrc     base.Specer `json:"-"`
+	srcMeta  Metaer      `json:"-"`
+	Dest     base.Spec   `json:"dest"`
+	IDest    base.Specer `json:"-"`
+	destMeta Metaer      `json:"-"`
+	State    JobState    `json:"state"`
+	Extra    JobExtra    `json:"extra"`
+
+	factory *Factory `json:"-"`
 
 	progress   *JobProgress `json:"-"`
 	db         storage.DB   `json:"-"`
@@ -135,60 +169,53 @@ type Job struct {
 	stop      chan struct{} `json:"-"`
 	isDeleted atomic.Bool   `json:"-"`
 
+	asyncMvTableCache  map[int64]struct{}      `json:"-"`
 	concurrencyManager *rpc.ConcurrencyManager `json:"-"`
 
 	lock sync.Mutex `json:"-"`
 }
 
-type jobContext struct {
+type JobContext struct {
 	context.Context
-	src              base.Spec
-	dest             base.Spec
-	db               storage.DB
-	skipError        bool
-	allowTableExists bool
-	factory          *Factory
-}
-
-func NewJobContext(src, dest base.Spec, skipError bool, allowTableExists bool, db storage.DB, factory *Factory) *jobContext {
-	return &jobContext{
-		Context:          context.Background(),
-		src:              src,
-		dest:             dest,
-		skipError:        skipError,
-		allowTableExists: allowTableExists,
-		db:               db,
-		factory:          factory,
-	}
+	Src              base.Spec
+	Dest             base.Spec
+	Db               storage.DB
+	SkipError        bool
+	AllowTableExists bool
+	ReuseBinlogLabel bool
+	Factory          *Factory
 }
 
 // new job
 func NewJobFromService(name string, ctx context.Context) (*Job, error) {
-	jobContext, ok := ctx.(*jobContext)
+	jobContext, ok := ctx.(*JobContext)
 	if !ok {
 		return nil, xerror.Errorf(xerror.Normal, "invalid context type: %T", ctx)
 	}
 
-	factory := jobContext.factory
-	src := jobContext.src
-	dest := jobContext.dest
+	factory := jobContext.Factory
+	src := jobContext.Src
+	dest := jobContext.Dest
 	job := &Job{
-		Name:      name,
-		Src:       src,
-		ISrc:      factory.NewSpecer(&src),
-		srcMeta:   factory.NewMeta(&jobContext.src),
-		Dest:      dest,
-		IDest:     factory.NewSpecer(&dest),
-		destMeta:  factory.NewMeta(&jobContext.dest),
-		SkipError: jobContext.skipError,
-		State:     JobRunning,
+		Name:     name,
+		Src:      src,
+		ISrc:     factory.NewSpecer(&src),
+		srcMeta:  factory.NewMeta(&jobContext.Src),
+		Dest:     dest,
+		IDest:    factory.NewSpecer(&dest),
+		destMeta: factory.NewMeta(&jobContext.Dest),
+		State:    JobRunning,
 
-		allowTableExists: jobContext.allowTableExists,
-		factory:          factory,
-		forceFullsync:    false,
+		Extra: JobExtra{
+			allowTableExists: jobContext.AllowTableExists,
+			ReuseBinlogLabel: jobContext.ReuseBinlogLabel,
+			SkipBinlog:       false,
+		},
+
+		factory: factory,
 
 		progress: nil,
-		db:       jobContext.db,
+		db:       jobContext.Db,
 		stop:     make(chan struct{}),
 
 		concurrencyManager: rpc.NewConcurrencyManager(),
@@ -256,28 +283,6 @@ func (j *Job) valid() error {
 		return xerror.New(xerror.Normal, "src/dest are not both db or table sync")
 	}
 
-	return nil
-}
-
-func (j *Job) RecoverDatabaseSync() error {
-	return nil
-}
-
-// database old data sync
-func (j *Job) DatabaseOldDataSync() error {
-	// Step 1: drop all tables
-	err := j.IDest.ClearDB()
-	if err != nil {
-		return err
-	}
-
-	// Step 2: make snapshot
-
-	return nil
-}
-
-// database sync
-func (j *Job) DatabaseSync() error {
 	return nil
 }
 
@@ -368,15 +373,22 @@ func (j *Job) handlePartialSyncTableNotFound() error {
 
 	if dropped, err := j.isTableDropped(tableId); err != nil {
 		return err
+	} else if dropped && j.SyncType == TableSync {
+		return xerror.Errorf(xerror.Normal, "table sync but table %s has been dropped, table id %d",
+			table, tableId)
 	} else if dropped {
 		// skip this partial sync because table has been dropped
 		log.Warnf("skip this partial sync because table %s has been dropped, table id: %d", table, tableId)
 		nextCommitSeq := j.progress.CommitSeq
-		if j.SyncType == DBSync {
-			j.progress.NextWithPersist(nextCommitSeq, DBIncrementalSync, Done, "")
-		} else {
-			j.progress.NextWithPersist(nextCommitSeq, TableIncrementalSync, Done, "")
+		// Since we don't know the commit seq of the drop table binlog, we set it to the max value to
+		// skip all binlogs.
+		//
+		// FIXME: it will skip drop table binlog too.
+		if len(j.progress.TableCommitSeqMap) == 0 {
+			j.progress.TableCommitSeqMap = make(map[int64]int64)
 		}
+		j.progress.TableCommitSeqMap[tableId] = math.MaxInt64
+		j.progress.NextWithPersist(nextCommitSeq, DBTablesIncrementalSync, Done, "")
 		return nil
 	} else if newTableName, err := j.srcMeta.GetTableNameById(tableId); err != nil {
 		return err
@@ -652,7 +664,10 @@ func (j *Job) partialSync() error {
 		}
 
 		restoreFinished, err := j.IDest.CheckRestoreFinished(restoreSnapshotName)
-		if err != nil {
+		if errors.Is(err, base.ErrRestoreSignatureNotMatched) {
+			log.Warnf("snapshot %s signature not match, retry partial sync with replace", restoreSnapshotName)
+			return j.newPartialSnapshot(tableId, table, nil, true)
+		} else if err != nil {
 			j.progress.NextSubVolatile(RestoreSnapshot, inMemoryData)
 			return err
 		}
@@ -778,7 +793,14 @@ func (j *Job) fullSync() error {
 			if err != nil {
 				return err
 			}
-			if len(tables) == 0 {
+			count := 0
+			for _, table := range tables {
+				// See fe/fe-core/src/main/java/org/apache/doris/backup/BackupHandler.java:backup() for details
+				if table.Type == record.TableTypeOlap || table.Type == record.TableTypeView {
+					count += 1
+				}
+			}
+			if count == 0 {
 				log.Warnf("full sync but source db is empty! retry later")
 				return nil
 			}
@@ -964,9 +986,12 @@ func (j *Job) fullSync() error {
 				Table:     &j.Src.Table,
 				AliasName: &j.Dest.Table,
 			}
+			if alias, ok := j.progress.TableAliases[j.Dest.Table]; ok {
+				log.Infof("fullsync alias dest table %s to %s", j.Dest.Table, alias)
+				tableRef.AliasName = &alias
+			}
 			tableRefs = append(tableRefs, tableRef)
-		}
-		if len(j.progress.TableAliases) > 0 {
+		} else if len(j.progress.TableAliases) > 0 {
 			tableRefs = make([]*festruct.TTableRef, 0)
 			viewMap := make(map[string]interface{})
 			for _, viewName := range inMemoryData.Views {
@@ -1092,6 +1117,7 @@ func (j *Job) fullSync() error {
 					}
 				}
 				log.Infof("the restore is cancelled, the unmatched %s %s is dropped, restore snapshot again", resource, tableName)
+				j.progress.NextSubVolatile(RestoreSnapshot, inMemoryData)
 				break
 			} else if err != nil {
 				j.progress.NextSubVolatile(RestoreSnapshot, inMemoryData)
@@ -1107,8 +1133,13 @@ func (j *Job) fullSync() error {
 			var commitSeq int64 = math.MaxInt64
 			switch j.SyncType {
 			case DBSync:
-				for _, seq := range tableCommitSeqMap {
+				for tableId, seq := range tableCommitSeqMap {
+					if seq == 0 {
+						// Skip the views
+						continue
+					}
 					commitSeq = utils.Min(commitSeq, seq)
+					log.Debugf("fullsync table commit seq, table id: %d, commit seq: %d", tableId, seq)
 				}
 				if snapshotResp.GetCommitSeq() > 0 {
 					commitSeq = utils.Min(commitSeq, snapshotResp.GetCommitSeq())
@@ -1257,8 +1288,44 @@ func (j *Job) newLabel(commitSeq int64) string {
 	}
 }
 
-// only called by DBSync, TableSync tableId is in Src/Dest Spec
+func (j *Job) isMaterializedViewTable(srcTableId int64) (bool, error) {
+	// 1. skip the OLAP tables
+	if j.SyncType == TableSync && srcTableId == j.Src.TableId {
+		return false, nil
+	}
+
+	if _, ok := j.progress.TableMapping[srcTableId]; ok {
+		return false, nil
+	}
+
+	// 2. query the cached mv tables
+	if _, ok := j.asyncMvTableCache[srcTableId]; ok {
+		return true, nil
+	}
+
+	// 3. query table from src cluster
+	srcTable, err := j.srcMeta.GetTable(srcTableId)
+	if err != nil {
+		return false, err
+	}
+
+	// 4. cache the table if it is a materialized view table
+	if srcTable.Type == record.TableTypeMaterializedView {
+		if j.asyncMvTableCache == nil {
+			j.asyncMvTableCache = make(map[int64]struct{})
+		}
+		j.asyncMvTableCache[srcTableId] = struct{}{}
+		return true, nil
+	}
+
+	return false, nil
+}
+
 func (j *Job) getDestTableIdBySrc(srcTableId int64) (int64, error) {
+	if j.SyncType == TableSync {
+		return j.Dest.TableId, nil
+	}
+
 	if j.progress.TableMapping != nil {
 		if destTableId, ok := j.progress.TableMapping[srcTableId]; ok {
 			return destTableId, nil
@@ -1271,12 +1338,12 @@ func (j *Job) getDestTableIdBySrc(srcTableId int64) (int64, error) {
 
 	// WARNING: the table name might be changed, and the TableMapping has been updated in time,
 	// only keep this for compatible.
-	srcTableName, err := j.srcMeta.GetTableNameById(srcTableId)
+	srcTable, err := j.srcMeta.GetTable(srcTableId)
 	if err != nil {
 		return 0, err
-	}
-
-	if destTableId, err := j.destMeta.GetTableId(srcTableName); err != nil {
+	} else if srcTable.Type == record.TableTypeMaterializedView {
+		return 0, ErrMaterializedViewTable
+	} else if destTableId, err := j.destMeta.GetTableId(srcTable.Name); err != nil {
 		return 0, err
 	} else {
 		j.progress.TableMapping[srcTableId] = destTableId
@@ -1285,6 +1352,10 @@ func (j *Job) getDestTableIdBySrc(srcTableId int64) (int64, error) {
 }
 
 func (j *Job) getDestNameBySrcId(srcTableId int64) (string, error) {
+	if j.SyncType == TableSync {
+		return j.Dest.Table, nil
+	}
+
 	destTableId, err := j.getDestTableIdBySrc(srcTableId)
 	if err != nil {
 		return "", err
@@ -1296,7 +1367,8 @@ func (j *Job) getDestNameBySrcId(srcTableId int64) (string, error) {
 	}
 
 	if name == "" {
-		return "", xerror.Errorf(xerror.Normal, "dest table name not found, dest table id: %d", destTableId)
+		return "", xerror.Errorf(xerror.Normal,
+			"dest table name not found, src table id: %d, dest table id: %d", srcTableId, destTableId)
 	}
 
 	return name, nil
@@ -1373,7 +1445,7 @@ func (j *Job) getStidsByDestTableId(destTableId int64, tableRecords []*record.Ta
 	return destStids, nil
 }
 
-func (j *Job) getReleatedTableRecords(upsert *record.Upsert) ([]*record.TableRecord, error) {
+func (j *Job) getRelatedTableRecords(upsert *record.Upsert) ([]*record.TableRecord, error) {
 	var tableRecords []*record.TableRecord //, 0, len(upsert.TableRecords))
 
 	switch j.SyncType {
@@ -1469,6 +1541,12 @@ func (j *Job) handleUpsertWithRetry(binlog *festruct.TBinlog) error {
 	}
 
 	log.Warnf("a meta error occurred, retry to handle upsert binlog again, commitSeq: %d", binlog.GetCommitSeq())
+	if j.progress.SubSyncState == RollbackTransaction {
+		// rollback transaction firstly
+		if err = j.handleUpsert(nil); err != nil {
+			return err
+		}
+	}
 	return j.handleUpsert(binlog)
 }
 
@@ -1487,6 +1565,7 @@ func (j *Job) handleUpsert(binlog *festruct.TBinlog) error {
 		SourceStids  []int64                     `json:"source_stid"`
 		DestStids    []int64                     `json:"desc_stid"`
 		SubTxnInfos  []*festruct.TSubTxnInfo     `json:"sub_txn_infos"`
+		Label        string                      `json:"label"`
 	}
 
 	updateInMemory := func() error {
@@ -1554,34 +1633,49 @@ func (j *Job) handleUpsert(binlog *festruct.TBinlog) error {
 			isTxnInsert = true
 		}
 
-		tableRecords, err := j.getReleatedTableRecords(upsert)
+		tableRecords, err := j.getRelatedTableRecords(upsert)
 		if err != nil {
 			log.Errorf("get related table records failed, err: %+v", err)
+			return err
 		}
 		if len(tableRecords) == 0 {
 			log.Debug("no related table records")
 			return nil
 		}
 
-		log.Debugf("tableRecords: %v", tableRecords)
 		destTableIds := make([]int64, 0, len(tableRecords))
 		if j.SyncType == DBSync {
+			savedRecords := make([]*record.TableRecord, 0, len(tableRecords))
 			for _, tableRecord := range tableRecords {
-				if destTableId, err := j.getDestTableIdBySrc(tableRecord.Id); err != nil {
+				if isAsyncMv, err := j.isMaterializedViewTable(tableRecord.Id); err != nil {
+					return err
+				} else if isAsyncMv {
+					// ignore the upsert of materialized view table.
+					continue
+				} else if destTableId, err := j.getDestTableIdBySrc(tableRecord.Id); err != nil {
 					return err
 				} else {
+					savedRecords = append(savedRecords, tableRecord)
 					destTableIds = append(destTableIds, destTableId)
 				}
 			}
+			tableRecords = savedRecords
 		} else {
 			destTableIds = append(destTableIds, j.Dest.TableId)
 		}
+		if len(tableRecords) == 0 {
+			log.Debug("no related table records")
+			return nil
+		}
+
+		log.Debugf("handle upsert, table records: %v", tableRecords)
 		inMemoryData := &inMemoryData{
 			CommitSeq:    upsert.CommitSeq,
 			DestTableIds: destTableIds,
 			TableRecords: tableRecords,
 			IsTxnInsert:  isTxnInsert,
 			SourceStids:  upsert.Stids,
+			Label:        upsert.Label,
 		}
 		j.progress.NextSubVolatile(BeginTransaction, inMemoryData)
 
@@ -1598,7 +1692,12 @@ func (j *Job) handleUpsert(binlog *festruct.TBinlog) error {
 			return err
 		}
 
-		label := j.newLabel(commitSeq)
+		var label string
+		if j.Extra.ReuseBinlogLabel {
+			label = inMemoryData.Label
+		} else {
+			label = j.newLabel(commitSeq)
+		}
 
 		var beginTxnResp *festruct.TBeginTxnResult_
 		if isTxnInsert {
@@ -1616,7 +1715,7 @@ func (j *Job) handleUpsert(binlog *festruct.TBinlog) error {
 			if isTableNotFound(beginTxnResp.GetStatus()) && j.SyncType == DBSync {
 				// It might caused by the staled TableMapping entries.
 				// In order to rebuild the dest table ids, this progress should be rollback.
-				j.progress.Rollback(j.SkipError)
+				j.progress.Rollback()
 				for _, tableRecord := range inMemoryData.TableRecords {
 					delete(j.progress.TableMapping, tableRecord.Id)
 				}
@@ -1697,7 +1796,7 @@ func (j *Job) handleUpsert(binlog *festruct.TBinlog) error {
 		destRpc, err := j.factory.NewFeRpc(dest)
 		if err != nil {
 			rollback(err, inMemoryData)
-			break
+			return err
 		}
 
 		isTxnInsert := inMemoryData.IsTxnInsert
@@ -1710,7 +1809,7 @@ func (j *Job) handleUpsert(binlog *festruct.TBinlog) error {
 		}
 		if err != nil {
 			rollback(err, inMemoryData)
-			break
+			return err
 		}
 
 		if statusCode := resp.Status.GetStatusCode(); statusCode == tstatus.TStatusCode_PUBLISH_TIMEOUT {
@@ -1718,7 +1817,7 @@ func (j *Job) handleUpsert(binlog *festruct.TBinlog) error {
 		} else if statusCode != tstatus.TStatusCode_OK {
 			err := xerror.Errorf(xerror.Normal, "commit txn failed, status: %v", resp.Status)
 			rollback(err, inMemoryData)
-			break
+			return err
 		}
 
 		log.Infof("TxnId: %d committed, resp: %v", txnId, resp)
@@ -1759,7 +1858,7 @@ func (j *Job) handleUpsert(binlog *festruct.TBinlog) error {
 		}
 
 		log.Infof("rollback TxnId: %d resp: %v", txnId, resp)
-		j.progress.Rollback(j.SkipError)
+		j.progress.Rollback()
 		return nil
 
 	default:
@@ -1784,25 +1883,21 @@ func (j *Job) handleAddPartition(binlog *festruct.TBinlog) error {
 		return nil
 	}
 
+	if isAsyncMv, err := j.isMaterializedViewTable(addPartition.TableId); err != nil {
+		return err
+	} else if isAsyncMv {
+		log.Warnf("skip add partition for materialized view table %d", addPartition.TableId)
+		return nil
+	}
+
 	if addPartition.IsTemp {
 		log.Infof("skip add temporary partition because backup/restore table with temporary partitions is not supported yet")
 		return nil
 	}
 
-	var destTableName string
-	if j.SyncType == TableSync {
-		destTableName = j.Dest.Table
-	} else if j.SyncType == DBSync {
-		destTableId, err := j.getDestTableIdBySrc(addPartition.TableId)
-		if err != nil {
-			return err
-		}
-
-		if destTableName, err = j.destMeta.GetTableNameById(destTableId); err != nil {
-			return err
-		} else if destTableName == "" {
-			return xerror.Errorf(xerror.Normal, "tableId %d not found in destMeta", destTableId)
-		}
+	destTableName, err := j.getDestNameBySrcId(addPartition.TableId)
+	if err != nil {
+		return err
 	}
 	return j.IDest.AddPartition(destTableName, addPartition)
 }
@@ -1827,20 +1922,16 @@ func (j *Job) handleDropPartition(binlog *festruct.TBinlog) error {
 		return nil
 	}
 
-	var destTableName string
-	if j.SyncType == TableSync {
-		destTableName = j.Dest.Table
-	} else if j.SyncType == DBSync {
-		destTableId, err := j.getDestTableIdBySrc(dropPartition.TableId)
-		if err != nil {
-			return err
-		}
+	if isAsyncMv, err := j.isMaterializedViewTable(dropPartition.TableId); err != nil {
+		return err
+	} else if isAsyncMv {
+		log.Warnf("skip drop partition for materialized view table %d", dropPartition.TableId)
+		return nil
+	}
 
-		if destTableName, err = j.destMeta.GetTableNameById(destTableId); err != nil {
-			return err
-		} else if destTableName == "" {
-			return xerror.Errorf(xerror.Normal, "tableId %d not found in destMeta", destTableId)
-		}
+	destTableName, err := j.getDestNameBySrcId(dropPartition.TableId)
+	if err != nil {
+		return err
 	}
 	return j.IDest.DropPartition(destTableName, dropPartition)
 }
@@ -1864,11 +1955,14 @@ func (j *Job) handleCreateTable(binlog *festruct.TBinlog) error {
 		return nil
 	}
 
+	if createTable.IsCreateMaterializedView() {
+		log.Warnf("create async materialized view is not supported yet, skip this binlog")
+		return nil
+	}
+
 	if featureCreateViewDropExists {
-		viewRegex := regexp.MustCompile(`(?i)^CREATE(\s+)VIEW`)
-		isCreateView := viewRegex.MatchString(createTable.Sql)
 		tableName := strings.TrimSpace(createTable.TableName)
-		if isCreateView && len(tableName) > 0 {
+		if createTable.IsCreateView() && len(tableName) > 0 {
 			// drop view if exists
 			log.Infof("feature_create_view_drop_exists is enabled, try drop view %s before creating", tableName)
 			if err = j.IDest.DropView(tableName); err != nil {
@@ -1876,6 +1970,12 @@ func (j *Job) handleCreateTable(binlog *festruct.TBinlog) error {
 					tableName, createTable.TableId)
 			}
 		}
+	}
+
+	if createTable.IsCreateTableWithInvertedIndex() {
+		log.Infof("create table %s with inverted index, force partial snapshot, commit seq : %d", createTable.TableName, binlog.GetCommitSeq())
+		// we need to force replace table to ensure the index id is consistent
+		return j.newPartialSnapshot(createTable.TableId, createTable.TableName, nil, true)
 	}
 
 	// Some operations, such as DROP TABLE, will be skiped in the partial/full snapshot,
@@ -1894,7 +1994,25 @@ func (j *Job) handleCreateTable(binlog *festruct.TBinlog) error {
 		}
 	}
 
+	if featureFilterStorageMedium {
+		createTable.Sql = FilterStorageMediumFromCreateTableSql(createTable.Sql)
+	}
+
 	if err = j.IDest.CreateTableOrView(createTable, j.Src.Database); err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "Can not found function") {
+			log.Warnf("skip creating table/view because the UDF function is not supported yet: %s", errMsg)
+			return nil
+		} else if strings.Contains(errMsg, "Can not find resource") {
+			log.Warnf("skip creating table/view for the resource is not supported yet: %s", errMsg)
+			return nil
+		}
+		if len(createTable.TableName) > 0 && IsSessionVariableRequired(errMsg) { // ignore doris 2.0.3
+			log.Infof("a session variable is required to create table %s, force partial snapshot, commit seq: %d, msg: %s",
+				createTable.TableName, binlog.GetCommitSeq(), errMsg)
+			replace := false // new table no need to replace
+			return j.newPartialSnapshot(createTable.TableId, createTable.TableName, nil, replace)
+		}
 		return xerror.Wrapf(err, xerror.Normal, "create table %d", createTable.TableId)
 	}
 
@@ -1950,11 +2068,17 @@ func (j *Job) handleDropTable(binlog *festruct.TBinlog) error {
 		if _, ok := j.progress.TableMapping[dropTable.TableId]; !ok {
 			log.Warnf("the dest table is not found, skip drop table binlog, src table id: %d, commit seq: %d",
 				dropTable.TableId, binlog.GetCommitSeq())
+			// So that the sync state would convert to DBIncrementalSync,
+			// see handlePartialSyncTableNotFound for details.
+			delete(j.progress.TableCommitSeqMap, dropTable.TableId)
 			return nil
 		}
 	}
 
 	if j.isBinlogCommitted(dropTable.TableId, binlog.GetCommitSeq()) {
+		// So that the sync state would convert to DBIncrementalSync,
+		// see handlePartialSyncTableNotFound for details.
+		delete(j.progress.TableCommitSeqMap, dropTable.TableId)
 		return nil
 	}
 
@@ -2002,6 +2126,27 @@ func (j *Job) handleDummy(binlog *festruct.TBinlog) error {
 	return j.newSnapshot(dummyCommitSeq)
 }
 
+func (j *Job) handleModifyProperty(binlog *festruct.TBinlog) error {
+	log.Infof("handle modify property binlog, prevCommitSeq: %d, commitSeq: %d",
+		j.progress.PrevCommitSeq, j.progress.CommitSeq)
+
+	data := binlog.GetData()
+	modifyProperty, err := record.NewModifyTablePropertyFromJson(data)
+	if err != nil {
+		return err
+	}
+
+	if j.isBinlogCommitted(modifyProperty.TableId, binlog.GetCommitSeq()) {
+		return nil
+	}
+
+	destTableName, err := j.getDestNameBySrcId(modifyProperty.TableId)
+	if err != nil {
+		return err
+	}
+	return j.Dest.ModifyTableProperty(destTableName, modifyProperty)
+}
+
 // handleAlterJob
 func (j *Job) handleAlterJob(binlog *festruct.TBinlog) error {
 	log.Infof("handle alter job binlog, prevCommitSeq: %d, commitSeq: %d",
@@ -2011,6 +2156,13 @@ func (j *Job) handleAlterJob(binlog *festruct.TBinlog) error {
 	alterJob, err := record.NewAlterJobV2FromJson(data)
 	if err != nil {
 		return err
+	}
+
+	if isAsyncMv, err := j.isMaterializedViewTable(alterJob.TableId); err != nil {
+		return err
+	} else if isAsyncMv {
+		log.Warnf("skip alter job for materialized view table %d", alterJob.TableId)
+		return nil
 	}
 
 	if featureSkipRollupBinlogs && alterJob.Type == record.ALTER_JOB_ROLLUP {
@@ -2167,15 +2319,9 @@ func (j *Job) handleRenameColumnRecord(commitSeq int64, renameColumn *record.Ren
 		return nil
 	}
 
-	var destTableName string
-	if j.SyncType == TableSync {
-		destTableName = j.Dest.Table
-	} else {
-		var err error
-		destTableName, err = j.getDestNameBySrcId(renameColumn.TableId)
-		if err != nil {
-			return err
-		}
+	destTableName, err := j.getDestNameBySrcId(renameColumn.TableId)
+	if err != nil {
+		return err
 	}
 
 	return j.IDest.RenameColumn(destTableName, renameColumn)
@@ -2196,19 +2342,13 @@ func (j *Job) handleModifyComment(binlog *festruct.TBinlog) error {
 }
 
 func (j *Job) handleModifyCommentRecord(commitSeq int64, modifyComment *record.ModifyComment) error {
-	if j.isBinlogCommitted(modifyComment.TblId, commitSeq) {
+	if j.isBinlogCommitted(modifyComment.TableId, commitSeq) {
 		return nil
 	}
 
-	var destTableName string
-	if j.SyncType == TableSync {
-		destTableName = j.Dest.Table
-	} else {
-		var err error
-		destTableName, err = j.getDestNameBySrcId(modifyComment.TblId)
-		if err != nil {
-			return err
-		}
+	destTableName, err := j.getDestNameBySrcId(modifyComment.TableId)
+	if err != nil {
+		return err
 	}
 
 	return j.IDest.ModifyComment(destTableName, modifyComment)
@@ -2258,6 +2398,13 @@ func (j *Job) handleReplacePartitions(binlog *festruct.TBinlog) error {
 	}
 
 	if j.isBinlogCommitted(replacePartition.TableId, binlog.GetCommitSeq()) {
+		return nil
+	}
+
+	if isAsyncMv, err := j.isMaterializedViewTable(replacePartition.TableId); err != nil {
+		return err
+	} else if isAsyncMv {
+		log.Warnf("skip replace partitions for materialized view table %d", replacePartition.TableId)
 		return nil
 	}
 
@@ -2317,15 +2464,16 @@ func (j *Job) handleRenameTableRecord(commitSeq int64, renameTable *record.Renam
 		return nil
 	}
 
-	var destTableName string
-	if j.SyncType == TableSync {
-		destTableName = j.Dest.Table
-	} else {
-		var err error
-		destTableName, err = j.getDestNameBySrcId(renameTable.TableId)
-		if err != nil {
-			return err
-		}
+	if isAsyncMv, err := j.isMaterializedViewTable(renameTable.TableId); err != nil {
+		return err
+	} else if isAsyncMv {
+		log.Warnf("skip rename table for materialized view table %d", renameTable.TableId)
+		return nil
+	}
+
+	destTableName, err := j.getDestNameBySrcId(renameTable.TableId)
+	if err != nil {
+		return err
 	}
 
 	if renameTable.NewTableName != "" && renameTable.OldTableName == "" {
@@ -2336,7 +2484,7 @@ func (j *Job) handleRenameTableRecord(commitSeq int64, renameTable *record.Renam
 		renameTable.OldTableName = destTableName
 	}
 
-	err := j.IDest.RenameTable(destTableName, renameTable)
+	err = j.IDest.RenameTable(destTableName, renameTable)
 	if err != nil {
 		return err
 	}
@@ -2370,8 +2518,40 @@ func (j *Job) handleReplaceTableRecord(commitSeq int64, record *record.ReplaceTa
 		return j.newSnapshot(commitSeq)
 	}
 
-	if j.isBinlogCommitted(record.OriginTableId, commitSeq) {
+	if isAsyncMv, err := j.isMaterializedViewTable(record.OriginTableId); err != nil {
+		return err
+	} else if isAsyncMv {
+		log.Warnf("skip replace table for materialized view table %d", record.OriginTableId)
 		return nil
+	}
+
+	if j.progress.SyncState == DBTablesIncrementalSync {
+		// if original table already committed, new partial snapshot with the new table
+		// if new table already committed, new partial snapshot with the original table
+		// if both table are committed, skip this binlog
+		originTableSynced := j.progress.TableCommitSeqMap[record.OriginTableId] >= commitSeq
+		newTableSynced := j.progress.TableCommitSeqMap[record.NewTableId] >= commitSeq
+		if originTableSynced && newTableSynced {
+			log.Infof("filter replace table binlog, both tables are synced, origin table %s id: %d, new table %s id: %d, commit seq: %d",
+				record.OriginTableName, record.OriginTableId, record.NewTableName, record.NewTableId, commitSeq)
+			return nil
+		} else if originTableSynced && !record.SwapTable {
+			log.Infof("filter replace table binlog, the origin table %s id %d already synced, commit seq: %d, swap = false",
+				record.OriginTableName, record.OriginTableId, commitSeq)
+			return nil
+		} else if originTableSynced && record.SwapTable {
+			log.Infof("force new partial snapshot, origin table %s id %d already synced, commit seq: %d",
+				record.OriginTableName, record.OriginTableId, commitSeq)
+			return j.newPartialSnapshot(record.NewTableId, record.OriginTableName, nil, false)
+		} else if newTableSynced && !record.SwapTable {
+			log.Infof("filter replace table binlog, the new table %s id %d already synced, commit seq: %d, swap = false",
+				record.NewTableName, record.NewTableId, commitSeq)
+			return nil
+		} else if newTableSynced && record.SwapTable {
+			log.Infof("force new partial snapshot, new table %s id %d already synced, commit seq: %d",
+				record.NewTableName, record.NewTableId, commitSeq)
+			return j.newPartialSnapshot(record.OriginTableId, record.NewTableName, nil, false)
+		}
 	}
 
 	toName := record.OriginTableName
@@ -2415,18 +2595,30 @@ func (j *Job) handleModifyTableAddOrDropInvertedIndicesRecord(commitSeq int64, r
 		return nil
 	}
 
-	var destTableName string
-	if j.SyncType == TableSync {
-		destTableName = j.Dest.Table
-	} else {
-		var err error
-		destTableName, err = j.getDestNameBySrcId(record.TableId)
+	if record.IsDropInvertedIndex {
+		destTableName, err := j.getDestNameBySrcId(record.TableId)
 		if err != nil {
 			return err
 		}
+
+		return j.IDest.LightningIndexChange(destTableName, record)
 	}
 
-	return j.IDest.LightningIndexChange(destTableName, record)
+	// Get the source table name, and trigger a partial snapshot
+	var tableName string
+	if j.SyncType == TableSync {
+		// for table sync with alias
+		tableName = j.Src.Table
+	} else {
+		if name, err := j.getDestNameBySrcId(record.TableId); err != nil {
+			return xerror.Errorf(xerror.Normal, "get dest table name by src id %d failed, err: %v", record.TableId, err)
+		} else {
+			tableName = name
+		}
+	}
+
+	replace := true
+	return j.newPartialSnapshot(record.TableId, tableName, nil, replace)
 }
 
 func (j *Job) handleIndexChangeJob(binlog *festruct.TBinlog) error {
@@ -2507,15 +2699,9 @@ func (j *Job) handleRenamePartitionRecord(commitSeq int64, renamePartition *reco
 		return nil
 	}
 
-	var destTableName string
-	if j.SyncType == TableSync {
-		destTableName = j.Dest.Table
-	} else {
-		var err error
-		destTableName, err = j.getDestNameBySrcId(renamePartition.TableId)
-		if err != nil {
-			return err
-		}
+	destTableName, err := j.getDestNameBySrcId(renamePartition.TableId)
+	if err != nil {
+		return err
 	}
 
 	newPartition := renamePartition.NewPartitionName
@@ -2552,15 +2738,9 @@ func (j *Job) handleRenameRollupRecord(commitSeq int64, renameRollup *record.Ren
 		return nil
 	}
 
-	var destTableName string
-	if j.SyncType == TableSync {
-		destTableName = j.Dest.Table
-	} else {
-		var err error
-		destTableName, err = j.getDestNameBySrcId(renameRollup.TableId)
-		if err != nil {
-			return err
-		}
+	destTableName, err := j.getDestNameBySrcId(renameRollup.TableId)
+	if err != nil {
+		return nil
 	}
 
 	newRollup := renameRollup.NewRollupName
@@ -2606,6 +2786,48 @@ func (j *Job) handleDropRollupRecord(commitSeq int64, dropRollup *record.DropRol
 	}
 
 	return j.IDest.DropRollup(destTableName, dropRollup.IndexName)
+}
+
+func (j *Job) handleRecoverInfo(binlog *festruct.TBinlog) error {
+	log.Infof("handle recoverInfo binlog, prevCommitSeq: %d, commitSeq: %d",
+		j.progress.PrevCommitSeq, j.progress.CommitSeq)
+
+	data := binlog.GetData()
+	recoverInfo, err := record.NewRecoverInfoFromJson(data)
+	if err != nil {
+		return err
+	}
+
+	return j.handleRecoverInfoRecord(binlog.GetCommitSeq(), recoverInfo)
+}
+
+func (j *Job) handleRecoverInfoRecord(commitSeq int64, recoverInfo *record.RecoverInfo) error {
+	if j.isBinlogCommitted(recoverInfo.TableId, commitSeq) {
+		return nil
+	}
+
+	if recoverInfo.IsRecoverTable() {
+		var tableName string
+		if recoverInfo.NewTableName != "" {
+			tableName = recoverInfo.NewTableName
+		} else {
+			tableName = recoverInfo.TableName
+		}
+		log.Infof("recover info with for table %s, will trigger partial sync", tableName)
+		return j.newPartialSnapshot(recoverInfo.TableId, tableName, nil, true)
+	}
+
+	var partitions []string
+	if recoverInfo.NewPartitionName != "" {
+		partitions = append(partitions, recoverInfo.NewPartitionName)
+	} else {
+		partitions = append(partitions, recoverInfo.PartitionName)
+	}
+	log.Infof("recover info with for partition(%s) for table %s, will trigger partial sync",
+		partitions, recoverInfo.TableName)
+	// if source does multiple recover of partition, then there is a race
+	// condition and some recover might miss due to commitseq change after snapshot.
+	return j.newPartialSnapshot(recoverInfo.TableId, recoverInfo.TableName, nil, true)
 }
 
 func (j *Job) handleBarrier(binlog *festruct.TBinlog) error {
@@ -2686,6 +2908,12 @@ func (j *Job) handleBarrier(binlog *festruct.TBinlog) error {
 			return err
 		}
 		return j.handleModifyCommentRecord(commitSeq, modifyComment)
+	case festruct.TBinlogType_RECOVER_INFO:
+		recoverInfo, err := record.NewRecoverInfoFromJson(barrierLog.Binlog)
+		if err != nil {
+			return err
+		}
+		return j.handleRecoverInfoRecord(commitSeq, recoverInfo)
 	case festruct.TBinlogType_BARRIER:
 		log.Info("handle barrier binlog, ignore it")
 	default:
@@ -2743,11 +2971,27 @@ func (j *Job) handleBinlog(binlog *festruct.TBinlog) error {
 		return xerror.Errorf(xerror.Normal, "invalid binlog: %v", binlog)
 	}
 
+	if !j.progress.IsDone() {
+		return xerror.Errorf(xerror.Normal, "the progress isn't done, need rollback, commit seq: %d", j.progress.CommitSeq)
+	}
+
 	log.Debugf("binlog type: %s, binlog data: %s", binlog.GetType(), binlog.GetData())
 
 	// Step 2: update job progress
 	j.progress.StartHandle(binlog.GetCommitSeq())
 	xmetrics.HandlingBinlog(j.Name, binlog.GetCommitSeq())
+
+	// Skip binlog conditionally
+	if j.Extra.SkipBinlog && j.Extra.SkipBy == SkipBySilence && j.Extra.SkipCommitSeq == binlog.GetCommitSeq() {
+		log.Warnf("silently skip binlog %d by user, binlog type: %s, binlog data: %s",
+			binlog.GetCommitSeq(), binlog.GetType(), binlog.GetData())
+		return nil
+	}
+
+	if utils.HasJobFailpoint(j.Name, "handle_binlog_failed") {
+		log.Warnf("fail to handle binlog by failpoint, binlog type: %s, binlog data: %s", binlog.GetType(), binlog.GetData())
+		return xerror.Errorf(xerror.Normal, "fail to handle binlog by failpoint")
+	}
 
 	switch binlog.GetType() {
 	case festruct.TBinlogType_UPSERT:
@@ -2773,7 +3017,7 @@ func (j *Job) handleBinlog(binlog *festruct.TBinlog) error {
 	case festruct.TBinlogType_ALTER_DATABASE_PROPERTY:
 		log.Info("handle alter database property binlog, ignore it")
 	case festruct.TBinlogType_MODIFY_TABLE_PROPERTY:
-		log.Info("handle alter table property binlog, ignore it")
+		return j.handleModifyProperty(binlog)
 	case festruct.TBinlogType_BARRIER:
 		return j.handleBarrier(binlog)
 	case festruct.TBinlogType_TRUNCATE_TABLE:
@@ -2798,6 +3042,8 @@ func (j *Job) handleBinlog(binlog *festruct.TBinlog) error {
 		return j.handleRenameRollup(binlog)
 	case festruct.TBinlogType_DROP_ROLLUP:
 		return j.handleDropRollup(binlog)
+	case festruct.TBinlogType_RECOVER_INFO:
+		return j.handleRecoverInfo(binlog)
 	default:
 		return xerror.Errorf(xerror.Normal, "unknown binlog type: %v", binlog.GetType())
 	}
@@ -2810,7 +3056,7 @@ func (j *Job) recoverIncrementalSync() error {
 	case BinlogUpsert:
 		return j.handleUpsert(nil)
 	default:
-		j.progress.Rollback(j.SkipError)
+		j.progress.Rollback()
 	}
 
 	return nil
@@ -2824,6 +3070,12 @@ func (j *Job) incrementalSync() error {
 		return j.recoverIncrementalSync()
 	}
 
+	// Force fullsync unconditionally
+	if j.Extra.SkipBinlog && j.Extra.SkipBy == SkipByFullSync {
+		log.Warnf("skip binlog via fullsync by user, commit seq %d", j.progress.CommitSeq)
+		return j.newSnapshot(j.progress.CommitSeq)
+	}
+
 	// Step 1: get binlog
 	log.Debug("start incremental sync")
 	src := &j.Src
@@ -2835,13 +3087,6 @@ func (j *Job) incrementalSync() error {
 
 	// Step 2: handle all binlog
 	for {
-		if j.forceFullsync {
-			log.Warnf("job is forced to step fullsync by user")
-			j.forceFullsync = false
-			_ = j.newSnapshot(j.progress.CommitSeq)
-			return nil
-		}
-
 		// The CommitSeq is equals to PrevCommitSeq in here.
 		commitSeq := j.progress.CommitSeq
 		log.Debugf("src: %s, commitSeq: %v", src, commitSeq)
@@ -2951,6 +3196,32 @@ func (j *Job) sync() error {
 	j.lock.Lock()
 	defer j.lock.Unlock()
 
+	// Update the skip state
+	if j.Extra.SkipBinlog {
+		committed := false
+		switch j.Extra.SkipBy {
+		case SkipBySilence:
+			if j.Extra.SkipCommitSeq <= j.progress.PrevCommitSeq {
+				// The binlog has been committed.
+				committed = true
+			}
+		case SkipByFullSync:
+			if j.progress.SyncState == DBFullSync || j.progress.SyncState == TableFullSync {
+				// The fullsync has been triggered.
+				committed = true
+			}
+		}
+		if committed {
+			j.Extra.SkipBinlog = false
+			log.Infof("reset skip binlog, skip by: %s, skip commit seq: %d, prev commit seq: %d",
+				j.Extra.SkipBy, j.Extra.SkipCommitSeq, j.progress.PrevCommitSeq)
+			if err := j.persistJob(); err != nil {
+				return err
+			}
+		}
+	}
+
+	j.updateJobStatus()
 	switch j.SyncType {
 	case TableSync:
 		return j.tableSync()
@@ -2983,14 +3254,12 @@ func (j *Job) handleError(err error) error {
 }
 
 func (j *Job) run() {
-	ticker := time.NewTicker(SYNC_DURATION)
+	ticker := time.NewTicker(SyncDuration)
 	defer ticker.Stop()
 
 	var panicError error
 
 	for {
-		j.updateJobStatus()
-
 		// do maybeDeleted first to avoid mark job deleted after job stopped & before job run & close stop chan gap in Delete, so job will not run
 		if j.maybeDeleted() {
 			return
@@ -3172,24 +3441,6 @@ func (j *Job) Desync() error {
 	}
 }
 
-func (j *Job) UpdateSkipError(skipError bool) error {
-	j.lock.Lock()
-	defer j.lock.Unlock()
-
-	originSkipError := j.SkipError
-	if originSkipError == skipError {
-		return nil
-	}
-
-	j.SkipError = skipError
-	if err := j.persistJob(); err != nil {
-		j.SkipError = originSkipError
-		return err
-	} else {
-		return nil
-	}
-}
-
 // stop job
 func (j *Job) Stop() {
 	close(j.stop)
@@ -3281,10 +3532,10 @@ func (j *Job) FirstRun() error {
 			return xerror.Errorf(xerror.Normal, "src table %s.%s not exists", j.Src.Database, j.Src.Table)
 		}
 
-		if enable, err := j.ISrc.IsTableEnableBinlog(); err != nil {
+		if invalidProperty, err := j.ISrc.CheckTablePropertyValid(); err != nil {
 			return err
-		} else if !enable {
-			return xerror.Errorf(xerror.Normal, "src table %s.%s not enable binlog", j.Src.Database, j.Src.Table)
+		} else if len(invalidProperty) != 0 {
+			return xerror.Errorf(xerror.Normal, "src table %s.%s only support property: %s", j.Src.Database, j.Src.Table, strings.Join(invalidProperty, ", "))
 		}
 
 		if srcTableId, err := j.srcMeta.GetTableId(j.Src.Table); err != nil {
@@ -3310,7 +3561,7 @@ func (j *Job) FirstRun() error {
 	} else {
 		j.Dest.DbId = destDbId
 	}
-	if j.SyncType == TableSync && !j.allowTableExists {
+	if j.SyncType == TableSync && !j.Extra.allowTableExists {
 		dest_table_exists, err := j.IDest.CheckTableExists()
 		if err != nil {
 			return err
@@ -3321,26 +3572,6 @@ func (j *Job) FirstRun() error {
 	}
 
 	return nil
-}
-
-func (j *Job) GetLag() (int64, error) {
-	j.lock.Lock()
-	defer j.lock.Unlock()
-
-	srcSpec := &j.Src
-	rpc, err := j.factory.NewFeRpc(srcSpec)
-	if err != nil {
-		return 0, err
-	}
-
-	commitSeq := j.progress.CommitSeq
-	resp, err := rpc.GetBinlogLag(srcSpec, commitSeq)
-	if err != nil {
-		return 0, err
-	}
-
-	log.Debugf("resp: %v, lag: %d", resp, resp.GetLag())
-	return resp.GetLag(), nil
 }
 
 func (j *Job) getJobState() JobState {
@@ -3381,14 +3612,6 @@ func (j *Job) Resume() error {
 	return j.changeJobState(JobRunning)
 }
 
-func (j *Job) ForceFullsync() {
-	log.Infof("force job %s step full sync", j.Name)
-
-	j.lock.Lock()
-	defer j.lock.Unlock()
-	j.forceFullsync = true
-}
-
 type RawJobStatus struct {
 	state         int32
 	progressState int32
@@ -3416,6 +3639,61 @@ func (j *Job) Status() *JobStatus {
 		State:         state,
 		ProgressState: progressState,
 	}
+}
+
+func (j *Job) UpdateHostMapping(srcHostMaps, destHostMaps map[string]string) error {
+	j.lock.Lock()
+	defer j.lock.Unlock()
+
+	oldSrcHostMapping := j.Src.HostMapping
+	if j.Src.HostMapping == nil {
+		j.Src.HostMapping = make(map[string]string)
+	}
+	for private, public := range srcHostMaps {
+		if public == "" {
+			delete(j.Src.HostMapping, private)
+		} else {
+			j.Src.HostMapping[private] = public
+		}
+	}
+
+	oldDestHostMapping := j.Dest.HostMapping
+	if j.Dest.HostMapping == nil {
+		j.Dest.HostMapping = make(map[string]string)
+	}
+	for private, public := range destHostMaps {
+		if public == "" {
+			delete(j.Dest.HostMapping, private)
+		} else {
+			j.Dest.HostMapping[private] = public
+		}
+	}
+
+	if err := j.persistJob(); err != nil {
+		j.Src.HostMapping = oldSrcHostMapping
+		j.Dest.HostMapping = oldDestHostMapping
+		return err
+	}
+
+	log.Debugf("update job %s src host mapping %+v, dest host mapping: %+v", j.Name, srcHostMaps, destHostMaps)
+	return nil
+}
+
+func (j *Job) SkipBinlog(skipCommitSeq int64, skipBy string) error {
+	j.lock.Lock()
+	defer j.lock.Unlock()
+
+	savedExtra := j.Extra
+	j.Extra.SkipBinlog = true
+	j.Extra.SkipCommitSeq = skipCommitSeq
+	j.Extra.SkipBy = skipBy
+	if err := j.persistJob(); err != nil {
+		j.Extra = savedExtra
+		return err
+	}
+
+	log.Infof("skip binlog by %s, commit seq %d, job %s", skipBy, skipCommitSeq, j.Name)
+	return nil
 }
 
 func isTxnCommitted(status *tstatus.TStatus) bool {
@@ -3455,4 +3733,14 @@ func isStatusContainsAny(status *tstatus.TStatus, patterns ...string) bool {
 		}
 	}
 	return false
+}
+
+func IsSessionVariableRequired(msg string) bool {
+	re := regexp.MustCompile(`set enable_.+=.+|Incorrect column name .* Column regex is`)
+	return re.MatchString(msg)
+}
+
+func FilterStorageMediumFromCreateTableSql(createSql string) string {
+	pattern := `"storage_medium"\s*=\s*"[^"]*"(,\s*)?`
+	return regexp.MustCompile(pattern).ReplaceAllString(createSql, "")
 }

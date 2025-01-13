@@ -1,3 +1,19 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License
 package ccr
 
 import (
@@ -21,9 +37,6 @@ const (
 	degree = 128
 
 	showErrMsg = "show proc '/dbs/' failed"
-
-	TABLE_TYPE_OLAP = "OLAP"
-	TABLE_TYPE_VIEW = "VIEW"
 )
 
 // All Update* functions force to update meta from fe
@@ -169,16 +182,21 @@ func (m *Meta) UpdateTable(tableName string, tableId int64) (*TableMeta, error) 
 		if err != nil {
 			return nil, xerror.Wrapf(err, xerror.Normal, query)
 		}
+		parsedTableType, err := rowParser.GetString("Type")
+		if err != nil {
+			return nil, xerror.Wrapf(err, xerror.Normal, query)
+		}
 
 		// match parsedDbname == dbname, return dbId
 		if parsedTableName == tableName || parsedTableId == tableId {
 			fullTableName := m.GetFullTableName(parsedTableName)
-			log.Debugf("found table:%s, tableId:%d", fullTableName, parsedTableId)
+			log.Debugf("found table:%s, tableId:%d, type:%s", fullTableName, parsedTableId, parsedTableType)
 			m.TableName2IdMap[fullTableName] = parsedTableId
 			tableMeta := &TableMeta{
 				DatabaseMeta:   &m.DatabaseMeta,
 				Id:             parsedTableId,
 				Name:           parsedTableName,
+				Type:           parsedTableType,
 				PartitionIdMap: make(map[int64]*PartitionMeta),
 			}
 			m.Tables[parsedTableId] = tableMeta
@@ -578,6 +596,17 @@ func (m *Meta) GetFrontends() ([]*base.Frontend, error) {
 		return nil, xerror.Wrap(err, xerror.Normal, query)
 	}
 
+	if len(m.HostMapping) != 0 {
+		for _, frontend := range frontends {
+			if host, ok := m.HostMapping[frontend.Host]; ok {
+				frontend.Host = host
+			} else {
+				return nil, xerror.Errorf(xerror.Normal,
+					"the public ip of host %s is not found, consider adding it via HTTP API /add_host_mapping", frontend.Host)
+			}
+		}
+	}
+
 	return frontends, nil
 }
 
@@ -585,7 +614,18 @@ func (m *Meta) GetBackends() ([]*base.Backend, error) {
 	if len(m.Backends) > 0 {
 		backends := make([]*base.Backend, 0, len(m.Backends))
 		for _, backend := range m.Backends {
-			backends = append(backends, backend)
+			backend := *backend // copy
+			backends = append(backends, &backend)
+		}
+		if len(m.HostMapping) != 0 {
+			for _, backend := range backends {
+				if host, ok := m.HostMapping[backend.Host]; ok {
+					backend.Host = host
+				} else {
+					return nil, xerror.Errorf(xerror.Normal,
+						"the public ip of host %s is not found, consider adding it via HTTP API /add_host_mapping", backend.Host)
+				}
+			}
 		}
 		return backends, nil
 	}
@@ -1046,17 +1086,13 @@ func (m *Meta) GetTables() (map[int64]*TableMeta, error) {
 		fullTableName := m.GetFullTableName(tableName)
 		log.Debugf("found table: %s, id: %d, type: %s", fullTableName, tableId, tableType)
 
-		if tableType != TABLE_TYPE_OLAP && tableType != TABLE_TYPE_VIEW {
-			// See fe/fe-core/src/main/java/org/apache/doris/backup/BackupHandler.java:backup() for details
-			continue
-		}
-
 		// match parsedDbname == dbname, return dbId
 		tableName2IdMap[fullTableName] = tableId
 		tables[tableId] = &TableMeta{
 			DatabaseMeta:   &m.DatabaseMeta,
 			Id:             tableId,
 			Name:           tableName,
+			Type:           tableType,
 			PartitionIdMap: make(map[int64]*PartitionMeta),
 		}
 	}

@@ -1,3 +1,19 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License
 package ccr
 
 import (
@@ -17,14 +33,15 @@ type TableMeta struct {
 	DatabaseMeta      *DatabaseMeta
 	Id                int64
 	BaseIndexId       int64
-	Name              string                    // maybe dirty, such after rename
+	Name              string // maybe dirty, such after rename
+	Type              string
 	PartitionIdMap    map[int64]*PartitionMeta  // partitionId -> partitionMeta
 	PartitionRangeMap map[string]*PartitionMeta // partitionRange -> partitionMeta
 }
 
 // Stringer
 func (t *TableMeta) String() string {
-	return fmt.Sprintf("TableMeta{(id:%d), (name:%s)}", t.Id, t.Name)
+	return fmt.Sprintf("TableMeta{(id:%d), (name:%s), (type:%s)}", t.Id, t.Name, t.Type)
 }
 
 type PartitionMeta struct {

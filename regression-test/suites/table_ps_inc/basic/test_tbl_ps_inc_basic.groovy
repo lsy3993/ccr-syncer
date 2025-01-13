@@ -38,6 +38,8 @@ suite("test_tbl_ps_inc_basic") {
     }
 
     sql "DROP TABLE IF EXISTS ${tableName}"
+    target_sql "DROP TABLE IF EXISTS ${tableName}"
+
     sql """
         CREATE TABLE if NOT EXISTS ${tableName}
         (
@@ -66,6 +68,7 @@ suite("test_tbl_ps_inc_basic") {
     helper.ccrJobCreate(tableName)
 
     assertTrue(helper.checkRestoreFinishTimesOf("${tableName}", 30))
+    assertTrue(helper.checkShowTimesOf("SHOW TABLES LIKE \"${tableName}\"", exist, 60, "target_sql"))
     assertTrue(helper.checkSelectTimesOf("SELECT * FROM ${tableName}", insert_num, 60))
 
     def first_job_progress = helper.get_job_progress(tableName)
@@ -83,6 +86,9 @@ suite("test_tbl_ps_inc_basic") {
     //      "jobState":"FINISHED",
     //      "rawSql":"ALTER TABLE `regression_test_schema_change`.`tbl_add_column6ab3b514b63c4368aa0a0149da0acabd` ADD COLUMN `first` int NULL DEFAULT \"0\" COMMENT \"\" FIRST"
     //  }
+
+    def column = sql " SHOW ALTER TABLE COLUMN FROM ${context.dbName} WHERE TableName = \"${tableName}\" "
+
     sql """
         ALTER TABLE ${tableName}
         ADD COLUMN `first` INT KEY DEFAULT "0" FIRST
@@ -94,7 +100,7 @@ suite("test_tbl_ps_inc_basic") {
                                 FROM ${context.dbName}
                                 WHERE TableName = "${tableName}" AND State = "FINISHED"
                                 """,
-                                has_count(1), 30))
+                                has_count(column.size() + 1), 30))
 
     sql "INSERT INTO ${tableName} VALUES (123, 123, 123, 1)"
     sql "INSERT INTO ${tableName} VALUES (123, 123, 123, 2)"

@@ -52,6 +52,10 @@ class Helper {
         this.suite = suite
         this.context = suite.context
         this.logger = suite.logger
+
+        // Disable fuzzy config for the ccr test suites.
+        suite.sql """ ADMIN SET FRONTEND CONFIG ("random_add_cluster_keys_for_mow" = "false") """
+        suite.target_sql """ ADMIN SET FRONTEND CONFIG ("random_add_cluster_keys_for_mow" = "false") """
     }
 
     void set_alias(String alias) {
@@ -85,10 +89,10 @@ class Helper {
 
         def gson = new com.google.gson.Gson()
 
-        Map<String, String> srcSpec = context.getSrcSpec(db)
+        Map<String, Object> srcSpec = context.getSrcSpec(db)
         srcSpec.put("table", table)
 
-        Map<String, String> destSpec = context.getDestSpec(db)
+        Map<String, Object> destSpec = context.getDestSpec(db)
         if (alias != null) {
             destSpec.put("table", alias)
         } else {
@@ -124,6 +128,16 @@ class Helper {
             endpoint syncerAddress
             body "${bodyJson}"
             op "post"
+            check { code, body ->
+                if (!"${code}".toString().equals("200")) {
+                    throw new Exception("request failed, code: ${code}, body: ${body}")
+                }
+                def jsonSlurper = new groovy.json.JsonSlurper()
+                def object = jsonSlurper.parseText "${body}"
+                if (!object.success) {
+                    throw new Exception("request failed, error msg: ${object.error_msg}")
+                }
+            }
         }
     }
 
@@ -176,6 +190,12 @@ class Helper {
     void enableDbBinlog() {
         suite.sql """
             ALTER DATABASE ${context.dbName} SET properties ("binlog.enable" = "true")
+            """
+    }
+
+    void disableDbBinlog() {
+        suite.sql """
+            ALTER DATABASE ${context.dbName} SET properties ("binlog.enable" = "false")
             """
     }
 
@@ -232,18 +252,20 @@ class Helper {
 
     // Check N times whether the num of rows of the downstream data is expected.
     Boolean checkSelectTimesOf(sqlString, rowSize, times) {
-        def tmpRes = suite.target_sql "${sqlString}"
-        while (tmpRes.size() != rowSize) {
-            sleep(sync_gap_time)
-            if (--times > 0) {
+        def tmpRes = []
+        while (times-- > 0) {
+            try {
                 tmpRes = suite.target_sql "${sqlString}"
-            } else {
-                logger.info("last select result: ${tmpRes}")
-                logger.info("expected row size: ${rowSize}, actual row size: ${tmpRes.size()}")
-                break
-            }
+                if (tmpRes.size() == rowSize) {
+                    return true
+                }
+            } catch (Exception) {}
+            sleep(sync_gap_time)
         }
-        return tmpRes.size() == rowSize
+
+        logger.info("last select result: ${tmpRes}")
+        logger.info("expected row size: ${rowSize}, actual row size: ${tmpRes.size()}")
+        return false
     }
 
     Boolean checkSelectColTimesOf(sqlString, colSize, times) {
@@ -387,8 +409,8 @@ class Helper {
             def version = String.format("%d%02d%02d", major, minor, patch).toLong()
             for (long expect : versions) {
                 logger.info("current version ${version}, expect version ${expect}")
-                def expect_version_set = expect / 100
-                def got_version_set = version / 100
+                def expect_version_set = expect.intdiv(100)
+                def got_version_set = version.intdiv(100)
                 if (expect_version_set == got_version_set && version < expect) {
                     return false
                 }
@@ -466,6 +488,82 @@ class Helper {
         logger.info("upstream describe: ${upstream_describe}")
         logger.info("downstream describe: ${downstream_describe}")
         return false
+    }
+
+    Boolean check_table_exists(String table, times = 30) {
+        while (times > 0) {
+            def res = suite.target_sql "SHOW TABLES LIKE '${table}'"
+            if (res.size() > 0) {
+                return true
+            }
+            sleep(sync_gap_time)
+            times--
+        }
+        return false
+    }
+
+    void addFailpoint(String failpoint, def value, String tableName = "") {
+        def gson = new com.google.gson.Gson()
+        def request_body = [
+            name: get_ccr_job_name(tableName),
+            failpoint: failpoint,
+        ]
+        if (value != null) {
+            request_body.put("value", value)
+        }
+        def add_failpoint_uri = { check_func ->
+            suite.httpTest {
+                uri "/failpoint"
+                endpoint syncerAddress
+                body gson.toJson(request_body)
+                op "post"
+                check check_func
+            }
+        }
+
+        add_failpoint_uri.call() { code, body ->
+            if (!"${code}".toString().equals("200")) {
+                throw "request failed, code: ${code}, body: ${body}"
+            }
+            def jsonSlurper = new groovy.json.JsonSlurper()
+            def object = jsonSlurper.parseText "${body}"
+            if (!object.success) {
+                throw "request failed, error msg: ${object.error_msg}"
+            }
+        }
+    }
+
+    void removeFailpoint(String failpoint, String tableName = "") {
+        addFailpoint(failpoint, null, tableName)
+    }
+
+    void forceSkipBinlogBy(String skipBy, Integer commitSeq = 0, String tableName = "") {
+        def gson = new com.google.gson.Gson()
+        def request_body = [
+            name: get_ccr_job_name(tableName),
+            skip_commit_seq: commitSeq,
+            skip_by: skipBy,
+        ]
+        def skip_binlog_uri = { check_func ->
+            suite.httpTest {
+                uri "/job_skip_binlog"
+                endpoint syncerAddress
+                body gson.toJson(request_body)
+                op "post"
+                check check_func
+            }
+        }
+
+        skip_binlog_uri.call() { code, body ->
+            if (!"${code}".toString().equals("200")) {
+                throw "request failed, code: ${code}, body: ${body}"
+            }
+            def jsonSlurper = new groovy.json.JsonSlurper()
+            def object = jsonSlurper.parseText "${body}"
+            if (!object.success) {
+                throw "request failed, error msg: ${object.error_msg}"
+            }
+        }
     }
 }
 

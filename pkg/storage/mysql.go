@@ -1,12 +1,29 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License
 package storage
 
 import (
 	"context"
 	"database/sql"
 	"encoding/base64"
-	"flag"
 	"fmt"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/selectdb/ccr_syncer/pkg/xerror"
@@ -16,18 +33,12 @@ const (
 	defaultMaxAllowedPacket = 1024 * 1024 * 1024
 )
 
-var maxAllowedPacket int64
-
-func init() {
-	flag.Int64Var(&maxAllowedPacket, "mysql_max_allowed_packet", defaultMaxAllowedPacket,
-		"Config the max allowed packet to send to mysql server, the upper limit is 1GB")
-}
-
 type MysqlDB struct {
-	db *sql.DB
+	db     *sql.DB
+	dbName string
 }
 
-func NewMysqlDB(host string, port int, user string, password string) (DB, error) {
+func NewMysqlDB(host string, port int, user string, password string, remoteDBName string) (DB, error) {
 	dbForDDL, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/?maxAllowedPacket=%d", user, password, host, port, maxAllowedPacket))
 	if err != nil {
 		return nil, xerror.Wrapf(err, xerror.DB, "mysql: open %s@tcp(%s:%s) failed", user, host, password)
@@ -43,6 +54,8 @@ func NewMysqlDB(host string, port int, user string, password string) (DB, error)
 		return nil, xerror.Wrapf(err, xerror.DB, "mysql: open mysql in db %s@tcp(%s:%d)/%s failed", user, host, port, remoteDBName)
 	}
 
+	SetDBOptions(db)
+
 	if _, err = db.Exec("CREATE TABLE IF NOT EXISTS jobs (`job_name` VARCHAR(512) PRIMARY KEY, `job_info` TEXT, `belong_to` VARCHAR(96))"); err != nil {
 		return nil, xerror.Wrap(err, xerror.DB, "mysql: create table jobs failed")
 	}
@@ -55,7 +68,7 @@ func NewMysqlDB(host string, port int, user string, password string) (DB, error)
 		return nil, xerror.Wrap(err, xerror.DB, "mysql: create table syncers failed")
 	}
 
-	return &MysqlDB{db: db}, nil
+	return &MysqlDB{db: db, dbName: remoteDBName}, nil
 }
 
 func (s *MysqlDB) AddJob(jobName string, jobInfo string, hostInfo string) error {
@@ -99,7 +112,9 @@ func (s *MysqlDB) UpdateJob(jobName string, jobInfo string) error {
 }
 
 func (s *MysqlDB) RemoveJob(jobName string) error {
-	txn, err := s.db.BeginTx(context.Background(), &sql.TxOptions{
+	var err error
+	var txn *sql.Tx
+	txn, err = s.db.BeginTx(context.Background(), &sql.TxOptions{
 		Isolation: sql.LevelRepeatableRead,
 		ReadOnly:  false,
 	})
@@ -107,21 +122,22 @@ func (s *MysqlDB) RemoveJob(jobName string) error {
 		return xerror.Wrapf(err, xerror.DB, "mysql: remove job begin transaction failed, name: %s", jobName)
 	}
 
-	if _, err := txn.Exec(fmt.Sprintf("DELETE FROM jobs WHERE job_name = '%s'", jobName)); err != nil {
-		if err := txn.Rollback(); err != nil {
-			return xerror.Wrapf(err, xerror.DB, "mysql: remove job failed, name: %s, and rollback failed too", jobName)
+	defer func() {
+		if err != nil {
+			log.Errorf("rebalance load failed and rollback, err: %v", err)
+			_ = txn.Rollback()
 		}
+	}()
+
+	if _, err = txn.Exec(fmt.Sprintf("DELETE FROM jobs WHERE job_name = '%s'", jobName)); err != nil {
 		return xerror.Wrapf(err, xerror.DB, "mysql: remove job failed, name: %s", jobName)
 	}
 
-	if _, err := txn.Exec(fmt.Sprintf("DELETE FROM progresses WHERE job_name = '%s'", jobName)); err != nil {
-		if err := txn.Rollback(); err != nil {
-			return xerror.Wrapf(err, xerror.DB, "mysql: remove progresses failed, name: %s, and rollback failed too", jobName)
-		}
+	if _, err = txn.Exec(fmt.Sprintf("DELETE FROM progresses WHERE job_name = '%s'", jobName)); err != nil {
 		return xerror.Wrapf(err, xerror.DB, "mysql: remove progresses failed, name: %s", jobName)
 	}
 
-	if err := txn.Commit(); err != nil {
+	if err = txn.Commit(); err != nil {
 		return xerror.Wrapf(err, xerror.DB, "mysql: remove job txn commit failed.")
 	}
 
@@ -220,20 +236,30 @@ func (s *MysqlDB) RefreshSyncer(hostInfo string, lastStamp int64) (int64, error)
 }
 
 func (s *MysqlDB) GetStampAndJobs(hostInfo string) (int64, []string, error) {
-	txn, err := s.db.BeginTx(context.Background(), &sql.TxOptions{
+	var err error
+	var txn *sql.Tx
+	txn, err = s.db.BeginTx(context.Background(), &sql.TxOptions{
 		Isolation: sql.LevelRepeatableRead,
 	})
 	if err != nil {
 		return -1, nil, xerror.Wrapf(err, xerror.DB, "mysql: begin IMMEDIATE transaction failed.")
 	}
 
+	defer func() {
+		if err != nil {
+			log.Errorf("rebalance load failed and rollback, err: %v", err)
+			_ = txn.Rollback()
+		}
+	}()
+
 	var timestamp int64
-	if err := txn.QueryRow(fmt.Sprintf("SELECT timestamp FROM syncers WHERE host_info = '%s'", hostInfo)).Scan(&timestamp); err != nil {
+	if err = txn.QueryRow(fmt.Sprintf("SELECT timestamp FROM syncers WHERE host_info = '%s'", hostInfo)).Scan(&timestamp); err != nil {
 		return -1, nil, xerror.Wrapf(err, xerror.DB, "mysql: get stamp failed.")
 	}
 
 	jobs := make([]string, 0)
-	rows, err := s.db.Query(fmt.Sprintf("SELECT job_name FROM jobs WHERE belong_to = '%s'", hostInfo))
+	var rows *sql.Rows
+	rows, err = s.db.Query(fmt.Sprintf("SELECT job_name FROM jobs WHERE belong_to = '%s'", hostInfo))
 	if err != nil {
 		return -1, nil, xerror.Wrapf(err, xerror.DB, "mysql: get job_nums failed.")
 	}
@@ -241,13 +267,13 @@ func (s *MysqlDB) GetStampAndJobs(hostInfo string) (int64, []string, error) {
 
 	for rows.Next() {
 		var jobName string
-		if err := rows.Scan(&jobName); err != nil {
+		if err = rows.Scan(&jobName); err != nil {
 			return -1, nil, xerror.Wrapf(err, xerror.DB, "mysql: scan job_name failed.")
 		}
 		jobs = append(jobs, jobName)
 	}
 
-	if err := txn.Commit(); err != nil {
+	if err = txn.Commit(); err != nil {
 		return -1, nil, xerror.Wrapf(err, xerror.DB, "mysql: get jobs & stamp txn commit failed.")
 	}
 
@@ -334,7 +360,9 @@ func (s *MysqlDB) dispatchJobs(txn *sql.Tx, hostInfo string, additionalJobs []st
 }
 
 func (s *MysqlDB) RebalanceLoadFromDeadSyncers(syncers []string) error {
-	txn, err := s.db.BeginTx(context.Background(), &sql.TxOptions{
+	var err error
+	var txn *sql.Tx
+	txn, err = s.db.BeginTx(context.Background(), &sql.TxOptions{
 		Isolation: sql.LevelSerializable,
 		ReadOnly:  false,
 	})
@@ -342,13 +370,22 @@ func (s *MysqlDB) RebalanceLoadFromDeadSyncers(syncers []string) error {
 		return xerror.Wrap(err, xerror.DB, "mysql: rebalance load begin txn failed")
 	}
 
+	defer func() {
+		if err != nil {
+			log.Errorf("rebalance load failed and rollback, err: %v", err)
+			_ = txn.Rollback()
+		}
+	}()
+
 	orphanJobs, err := s.getOrphanJobs(txn, syncers)
 	if err != nil {
 		return err
 	}
 
 	additionalLoad := len(orphanJobs)
-	loadList, currentLoad, err := s.getLoadInfo(txn)
+	var loadList LoadSlice
+	var currentLoad int
+	loadList, currentLoad, err = s.getLoadInfo(txn)
 	if err != nil {
 		return err
 	}
@@ -359,16 +396,13 @@ func (s *MysqlDB) RebalanceLoadFromDeadSyncers(syncers []string) error {
 	}
 	for i := range loadList {
 		beginIdx := additionalLoad - loadList[i].AddedLoad
-		if err := s.dispatchJobs(txn, loadList[i].HostInfo, orphanJobs[beginIdx:additionalLoad]); err != nil {
-			if err := txn.Rollback(); err != nil {
-				return xerror.Wrap(err, xerror.DB, "mysql: rebalance rollback failed.")
-			}
+		if err = s.dispatchJobs(txn, loadList[i].HostInfo, orphanJobs[beginIdx:additionalLoad]); err != nil {
 			return err
 		}
 		additionalLoad = beginIdx
 	}
 
-	if err := txn.Commit(); err != nil {
+	if err = txn.Commit(); err != nil {
 		return xerror.Wrap(err, xerror.DB, "mysql: rebalance txn commit failed.")
 	}
 

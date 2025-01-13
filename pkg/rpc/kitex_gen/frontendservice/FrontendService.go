@@ -637,8 +637,8 @@ const (
 	TBinlogType_RENAME_ROLLUP                             TBinlogType = 21
 	TBinlogType_RENAME_PARTITION                          TBinlogType = 22
 	TBinlogType_DROP_ROLLUP                               TBinlogType = 23
-	TBinlogType_MIN_UNKNOWN                               TBinlogType = 24
-	TBinlogType_UNKNOWN_9                                 TBinlogType = 25
+	TBinlogType_RECOVER_INFO                              TBinlogType = 24
+	TBinlogType_MIN_UNKNOWN                               TBinlogType = 25
 	TBinlogType_UNKNOWN_10                                TBinlogType = 26
 	TBinlogType_UNKNOWN_11                                TBinlogType = 27
 	TBinlogType_UNKNOWN_12                                TBinlogType = 28
@@ -782,10 +782,10 @@ func (p TBinlogType) String() string {
 		return "RENAME_PARTITION"
 	case TBinlogType_DROP_ROLLUP:
 		return "DROP_ROLLUP"
+	case TBinlogType_RECOVER_INFO:
+		return "RECOVER_INFO"
 	case TBinlogType_MIN_UNKNOWN:
 		return "MIN_UNKNOWN"
-	case TBinlogType_UNKNOWN_9:
-		return "UNKNOWN_9"
 	case TBinlogType_UNKNOWN_10:
 		return "UNKNOWN_10"
 	case TBinlogType_UNKNOWN_11:
@@ -1022,10 +1022,10 @@ func TBinlogTypeFromString(s string) (TBinlogType, error) {
 		return TBinlogType_RENAME_PARTITION, nil
 	case "DROP_ROLLUP":
 		return TBinlogType_DROP_ROLLUP, nil
+	case "RECOVER_INFO":
+		return TBinlogType_RECOVER_INFO, nil
 	case "MIN_UNKNOWN":
 		return TBinlogType_MIN_UNKNOWN, nil
-	case "UNKNOWN_9":
-		return TBinlogType_UNKNOWN_9, nil
 	case "UNKNOWN_10":
 		return TBinlogType_UNKNOWN_10, nil
 	case "UNKNOWN_11":

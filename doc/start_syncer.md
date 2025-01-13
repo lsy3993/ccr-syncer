@@ -22,6 +22,13 @@ output_dir
 bash bin/start_syncer.sh --daemon
 ```
 
+### --config_file
+该配置文件指定CCR Syncer元数据库的信息，文件内容包括db_type，db_host，db_port，db_user，db_password。默认值是db.conf
+使用该选项启动CCR Syncer进程后，**不应再使用db_type，db_host，db_port，db_user，db_password来指定元数据信息**
+```bash
+bash bin/start_syncer.sh --config_file /path/to/db.conf
+```
+
 ### --db_type  
 Syncer目前能够使用两种数据库来保存自身的元数据，分别为`sqlite3`（对应本地存储）和`mysql` 或者`postgresql`（本地或远端存储）
 ```bash

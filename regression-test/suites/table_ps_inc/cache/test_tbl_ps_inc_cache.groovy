@@ -33,6 +33,8 @@ suite("test_tbl_ps_inc_cache") {
     }
 
     sql "DROP TABLE IF EXISTS ${tableName}"
+    target_sql "DROP TABLE IF EXISTS ${tableName}"
+
     sql """
         CREATE TABLE if NOT EXISTS ${tableName}
         (
@@ -58,12 +60,14 @@ suite("test_tbl_ps_inc_cache") {
         """
     sql "sync"
 
+    helper.ccrJobDelete(tableName)
     helper.ccrJobCreate(tableName)
 
     assertTrue(helper.checkRestoreFinishTimesOf("${tableName}", 30))
+    assertTrue(helper.checkShowTimesOf("SHOW TABLES LIKE \"${tableName}\"", exist, 60, "target_sql"))
     assertTrue(helper.checkSelectTimesOf("SELECT * FROM ${tableName}", insert_num, 60))
 
-    first_job_progress = helper.get_job_progress(tableName)
+    def first_job_progress = helper.get_job_progress(tableName)
 
     logger.info("=== Test 1: add first column case ===")
     // binlog type: ALTER_JOB, binlog data:
@@ -76,6 +80,9 @@ suite("test_tbl_ps_inc_cache") {
     //      "jobState":"FINISHED",
     //      "rawSql":"ALTER TABLE `regression_test_schema_change`.`tbl_add_column6ab3b514b63c4368aa0a0149da0acabd` ADD COLUMN `first` int NULL DEFAULT \"0\" COMMENT \"\" FIRST"
     //  }
+
+    def column = sql " SHOW ALTER TABLE COLUMN FROM ${context.dbName} WHERE TableName = \"${tableName}\" "
+
     sql """
         ALTER TABLE ${tableName}
         ADD COLUMN `first` INT KEY DEFAULT "0" FIRST
@@ -87,7 +94,7 @@ suite("test_tbl_ps_inc_cache") {
                                 FROM ${context.dbName}
                                 WHERE TableName = "${tableName}" AND State = "FINISHED"
                                 """,
-                                has_count(1), 30))
+                                has_count(column.size() + 1), 30))
 
     def has_column_first = { res -> Boolean
         // Field == 'first' && 'Key' == 'YES'
@@ -102,7 +109,7 @@ suite("test_tbl_ps_inc_cache") {
     assertTrue(helper.checkSelectTimesOf("SELECT * FROM ${tableName}", insert_num + 1, 60))
 
     // no full sync triggered.
-    last_job_progress = helper.get_job_progress(tableName)
+    def last_job_progress = helper.get_job_progress(tableName)
     assertTrue(last_job_progress.full_sync_start_at == first_job_progress.full_sync_start_at)
 }
 

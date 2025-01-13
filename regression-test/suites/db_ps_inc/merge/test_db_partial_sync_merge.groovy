@@ -40,6 +40,10 @@ suite("test_db_partial_sync_inc_merge") {
 
     helper.enableDbBinlog()
     sql "DROP TABLE IF EXISTS ${tableName}"
+    sql "DROP TABLE IF EXISTS ${tableName1}"
+    target_sql "DROP TABLE IF EXISTS ${tableName}"
+    target_sql "DROP TABLE IF EXISTS ${tableName1}"
+
     sql """
         CREATE TABLE if NOT EXISTS ${tableName}
         (
@@ -90,6 +94,8 @@ suite("test_db_partial_sync_inc_merge") {
     helper.ccrJobCreate()
 
     assertTrue(helper.checkRestoreFinishTimesOf("${tableName}", 30))
+    assertTrue(helper.checkShowTimesOf("SHOW TABLES LIKE \"${tableName}\"", exist, 60, "target_sql"))
+    assertTrue(helper.checkShowTimesOf("SHOW TABLES LIKE \"${tableName1}\"", exist, 60, "target_sql"))
     assertTrue(helper.checkSelectTimesOf("SELECT * FROM ${tableName}", insert_num, 60))
     assertTrue(helper.checkSelectTimesOf("SELECT * FROM ${tableName1}", insert_num, 60))
 
@@ -105,6 +111,8 @@ suite("test_db_partial_sync_inc_merge") {
     //                      -> db incremental sync
     helper.ccrJobPause()
 
+    def column = sql " SHOW ALTER TABLE COLUMN FROM ${context.dbName} WHERE TableName = \"${tableName}\" "
+
     sql """
         ALTER TABLE ${tableName}
         ADD COLUMN `first` INT KEY DEFAULT "0" FIRST
@@ -116,9 +124,11 @@ suite("test_db_partial_sync_inc_merge") {
                                 FROM ${context.dbName}
                                 WHERE TableName = "${tableName}" AND State = "FINISHED"
                                 """,
-                                has_count(1), 30))
+                                has_count(column.size() + 1), 30))
 
     sql "INSERT INTO ${tableName} VALUES (123, 123, 123, 1)"
+
+    column = sql " SHOW ALTER TABLE COLUMN FROM ${context.dbName} WHERE TableName = \"${tableName1}\" "
 
     sql """
         ALTER TABLE ${tableName1}
@@ -131,7 +141,7 @@ suite("test_db_partial_sync_inc_merge") {
                                 FROM ${context.dbName}
                                 WHERE TableName = "${tableName1}" AND State = "FINISHED"
                                 """,
-                                has_count(1), 30))
+                                has_count(column.size() + 1), 30))
 
     sql "INSERT INTO ${tableName} VALUES (123, 123, 123, 2)"
     sql "INSERT INTO ${tableName} VALUES (123, 123, 123, 3)"

@@ -1,3 +1,19 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License
 package ccr
 
 import (
@@ -249,7 +265,21 @@ func (tm *ThriftMeta) GetIndexNameMap(tableId, partitionId int64) (map[string]*I
 }
 
 func (tm *ThriftMeta) GetBackendMap() (map[int64]*base.Backend, error) {
-	return tm.meta.Backends, nil
+	if tm.meta.HostMapping == nil {
+		return tm.meta.Backends, nil
+	}
+
+	backends := make(map[int64]*base.Backend)
+	for id, backend := range tm.meta.Backends {
+		if host, ok := tm.meta.HostMapping[backend.Host]; ok {
+			backend.Host = host
+		} else {
+			return nil, xerror.Errorf(xerror.Normal,
+				"the public ip of host %s is not found, consider adding it via HTTP API /update_host_mapping", backend.Host)
+		}
+		backends[id] = backend
+	}
+	return backends, nil
 }
 
 // Whether the target partition are dropped

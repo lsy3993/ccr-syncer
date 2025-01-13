@@ -1,3 +1,19 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License
 package storage
 
 import (
@@ -7,20 +23,25 @@ import (
 	"fmt"
 	"time"
 
+	log "github.com/sirupsen/logrus"
+
 	_ "github.com/lib/pq"
 	"github.com/selectdb/ccr_syncer/pkg/xerror"
 )
 
 type PostgresqlDB struct {
-	db *sql.DB
+	db     *sql.DB
+	dbName string
 }
 
-func NewPostgresqlDB(host string, port int, user string, password string) (DB, error) {
+func NewPostgresqlDB(host string, port int, user string, password string, remoteDBName string) (DB, error) {
 	url := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", user, password, host, port, "postgres")
 	db, err := sql.Open("postgres", url)
 	if err != nil {
 		return nil, xerror.Wrapf(err, xerror.DB, "postgresql: open %s:%d failed", host, port)
 	}
+
+	SetDBOptions(db)
 
 	if _, err := db.Exec(fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", remoteDBName)); err != nil {
 		return nil, xerror.Wrapf(err, xerror.DB, "postgresql: create schema %s failed", remoteDBName)
@@ -38,13 +59,13 @@ func NewPostgresqlDB(host string, port int, user string, password string) (DB, e
 		return nil, xerror.Wrap(err, xerror.DB, "postgresql: create table syncers failed")
 	}
 
-	return &PostgresqlDB{db: db}, nil
+	return &PostgresqlDB{db: db, dbName: remoteDBName}, nil
 }
 
 func (s *PostgresqlDB) AddJob(jobName string, jobInfo string, hostInfo string) error {
 	// check job name exists, if exists, return error
 	var count int
-	if err := s.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s.jobs WHERE job_name = '%s'", remoteDBName, jobName)).Scan(&count); err != nil {
+	if err := s.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s.jobs WHERE job_name = '%s'", s.dbName, jobName)).Scan(&count); err != nil {
 		return xerror.Wrapf(err, xerror.DB, "postgresql: query job name %s failed", jobName)
 	}
 
@@ -53,7 +74,7 @@ func (s *PostgresqlDB) AddJob(jobName string, jobInfo string, hostInfo string) e
 	}
 
 	// insert job info
-	insertSql := fmt.Sprintf("INSERT INTO %s.jobs (job_name, job_info, belong_to) VALUES ('%s', '%s', '%s')", remoteDBName, jobName, jobInfo, hostInfo)
+	insertSql := fmt.Sprintf("INSERT INTO %s.jobs (job_name, job_info, belong_to) VALUES ('%s', '%s', '%s')", s.dbName, jobName, jobInfo, hostInfo)
 	if _, err := s.db.Exec(insertSql); err != nil {
 		return xerror.Wrapf(err, xerror.DB, "postgresql: insert job name %s failed", jobName)
 	} else {
@@ -65,7 +86,7 @@ func (s *PostgresqlDB) AddJob(jobName string, jobInfo string, hostInfo string) e
 func (s *PostgresqlDB) UpdateJob(jobName string, jobInfo string) error {
 	// check job name exists, if not exists, return error
 	var count int
-	if err := s.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s.jobs WHERE job_name = '%s'", remoteDBName, jobName)).Scan(&count); err != nil {
+	if err := s.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s.jobs WHERE job_name = '%s'", s.dbName, jobName)).Scan(&count); err != nil {
 		return xerror.Wrapf(err, xerror.DB, "postgresql: query job name %s failed", jobName)
 	}
 
@@ -74,7 +95,7 @@ func (s *PostgresqlDB) UpdateJob(jobName string, jobInfo string) error {
 	}
 
 	// update job info
-	if _, err := s.db.Exec(fmt.Sprintf("UPDATE %s.jobs SET job_info = '%s' WHERE job_name = '%s'", remoteDBName, jobInfo, jobName)); err != nil {
+	if _, err := s.db.Exec(fmt.Sprintf("UPDATE %s.jobs SET job_info = '%s' WHERE job_name = '%s'", s.dbName, jobInfo, jobName)); err != nil {
 		return xerror.Wrapf(err, xerror.DB, "postgresql: update job name %s failed", jobName)
 	} else {
 		return nil
@@ -82,7 +103,9 @@ func (s *PostgresqlDB) UpdateJob(jobName string, jobInfo string) error {
 }
 
 func (s *PostgresqlDB) RemoveJob(jobName string) error {
-	txn, err := s.db.BeginTx(context.Background(), &sql.TxOptions{
+	var err error
+	var txn *sql.Tx
+	txn, err = s.db.BeginTx(context.Background(), &sql.TxOptions{
 		Isolation: sql.LevelRepeatableRead,
 		ReadOnly:  false,
 	})
@@ -90,21 +113,22 @@ func (s *PostgresqlDB) RemoveJob(jobName string) error {
 		return xerror.Wrapf(err, xerror.DB, "postgresql: remove job begin transaction failed, name: %s", jobName)
 	}
 
-	if _, err := txn.Exec(fmt.Sprintf("DELETE FROM %s.jobs WHERE job_name = '%s'", remoteDBName, jobName)); err != nil {
-		if err := txn.Rollback(); err != nil {
-			return xerror.Wrapf(err, xerror.DB, "postgresql: remove job failed, name: %s, and rollback failed too", jobName)
+	defer func() {
+		if err != nil {
+			log.Errorf("rebalance load failed and rollback, err: %v", err)
+			_ = txn.Rollback()
 		}
+	}()
+
+	if _, err = txn.Exec(fmt.Sprintf("DELETE FROM %s.jobs WHERE job_name = '%s'", s.dbName, jobName)); err != nil {
 		return xerror.Wrapf(err, xerror.DB, "postgresql: remove job failed, name: %s", jobName)
 	}
 
-	if _, err := txn.Exec(fmt.Sprintf("DELETE FROM %s.progresses WHERE job_name = '%s'", remoteDBName, jobName)); err != nil {
-		if err := txn.Rollback(); err != nil {
-			return xerror.Wrapf(err, xerror.DB, "postgresql: remove progresses failed, name: %s, and rollback failed too", jobName)
-		}
+	if _, err = txn.Exec(fmt.Sprintf("DELETE FROM %s.progresses WHERE job_name = '%s'", s.dbName, jobName)); err != nil {
 		return xerror.Wrapf(err, xerror.DB, "postgresql: remove progresses failed, name: %s", jobName)
 	}
 
-	if err := txn.Commit(); err != nil {
+	if err = txn.Commit(); err != nil {
 		return xerror.Wrapf(err, xerror.DB, "postgresql: remove job txn commit failed.")
 	}
 
@@ -113,7 +137,7 @@ func (s *PostgresqlDB) RemoveJob(jobName string) error {
 
 func (s *PostgresqlDB) IsJobExist(jobName string) (bool, error) {
 	var count int
-	if err := s.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s.jobs WHERE job_name = '%s'", remoteDBName, jobName)).Scan(&count); err != nil {
+	if err := s.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s.jobs WHERE job_name = '%s'", s.dbName, jobName)).Scan(&count); err != nil {
 		return false, xerror.Wrapf(err, xerror.DB, "postgresql: query job name %s failed", jobName)
 	} else {
 		return count > 0, nil
@@ -122,7 +146,7 @@ func (s *PostgresqlDB) IsJobExist(jobName string) (bool, error) {
 
 func (s *PostgresqlDB) GetJobInfo(jobName string) (string, error) {
 	var jobInfo string
-	if err := s.db.QueryRow(fmt.Sprintf("SELECT job_info FROM %s.jobs WHERE job_name = '%s'", remoteDBName, jobName)).Scan(&jobInfo); err != nil {
+	if err := s.db.QueryRow(fmt.Sprintf("SELECT job_info FROM %s.jobs WHERE job_name = '%s'", s.dbName, jobName)).Scan(&jobInfo); err != nil {
 		return "", xerror.Wrapf(err, xerror.DB, "postgresql: get job failed, name: %s", jobName)
 	}
 	return jobInfo, nil
@@ -130,7 +154,7 @@ func (s *PostgresqlDB) GetJobInfo(jobName string) (string, error) {
 
 func (s *PostgresqlDB) GetJobBelong(jobName string) (string, error) {
 	var belong string
-	if err := s.db.QueryRow(fmt.Sprintf("SELECT belong_to FROM %s.jobs WHERE job_name = '%s'", remoteDBName, jobName)).Scan(&belong); err != nil {
+	if err := s.db.QueryRow(fmt.Sprintf("SELECT belong_to FROM %s.jobs WHERE job_name = '%s'", s.dbName, jobName)).Scan(&belong); err != nil {
 		return "", xerror.Wrapf(err, xerror.DB, "postgresql: get job belong failed, name: %s", jobName)
 	}
 	return belong, nil
@@ -139,7 +163,7 @@ func (s *PostgresqlDB) GetJobBelong(jobName string) (string, error) {
 func (s *PostgresqlDB) UpdateProgress(jobName string, progress string) error {
 	// quoteProgress := strings.ReplaceAll(progress, "\"", "\\\"")
 	encodeProgress := base64.StdEncoding.EncodeToString([]byte(progress))
-	updateSql := fmt.Sprintf("INSERT INTO %s.progresses (job_name, progress) VALUES ('%s', '%s') ON CONFLICT (job_name) DO UPDATE SET progress = EXCLUDED.progress", remoteDBName, jobName, encodeProgress)
+	updateSql := fmt.Sprintf("INSERT INTO %s.progresses (job_name, progress) VALUES ('%s', '%s') ON CONFLICT (job_name) DO UPDATE SET progress = EXCLUDED.progress", s.dbName, jobName, encodeProgress)
 	if result, err := s.db.Exec(updateSql); err != nil {
 		return xerror.Wrapf(err, xerror.DB, "postgresql: update progress failed")
 	} else if rowNum, err := result.RowsAffected(); err != nil {
@@ -153,7 +177,7 @@ func (s *PostgresqlDB) UpdateProgress(jobName string, progress string) error {
 
 func (s *PostgresqlDB) IsProgressExist(jobName string) (bool, error) {
 	var count int
-	if err := s.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s.progresses WHERE job_name = '%s'", remoteDBName, jobName)).Scan(&count); err != nil {
+	if err := s.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s.progresses WHERE job_name = '%s'", s.dbName, jobName)).Scan(&count); err != nil {
 		return false, xerror.Wrapf(err, xerror.DB, "postgresql: query job name %s failed", jobName)
 	}
 
@@ -162,7 +186,7 @@ func (s *PostgresqlDB) IsProgressExist(jobName string) (bool, error) {
 
 func (s *PostgresqlDB) GetProgress(jobName string) (string, error) {
 	var progress string
-	if err := s.db.QueryRow(fmt.Sprintf("SELECT progress FROM %s.progresses WHERE job_name = '%s'", remoteDBName, jobName)).Scan(&progress); err != nil {
+	if err := s.db.QueryRow(fmt.Sprintf("SELECT progress FROM %s.progresses WHERE job_name = '%s'", s.dbName, jobName)).Scan(&progress); err != nil {
 		return "", xerror.Wrapf(err, xerror.DB, "postgresql: query progress failed")
 	}
 	decodeProgress, err := base64.StdEncoding.DecodeString(progress)
@@ -175,7 +199,7 @@ func (s *PostgresqlDB) GetProgress(jobName string) (string, error) {
 
 func (s *PostgresqlDB) AddSyncer(hostInfo string) error {
 	timestamp := time.Now().UnixNano()
-	addSql := fmt.Sprintf("INSERT INTO %s.syncers (host_info, timestamp) VALUES ('%s', %d) ON CONFLICT (host_info) DO UPDATE SET timestamp = EXCLUDED.timestamp", remoteDBName, hostInfo, timestamp)
+	addSql := fmt.Sprintf("INSERT INTO %s.syncers (host_info, timestamp) VALUES ('%s', %d) ON CONFLICT (host_info) DO UPDATE SET timestamp = EXCLUDED.timestamp", s.dbName, hostInfo, timestamp)
 	if result, err := s.db.Exec(addSql); err != nil {
 		return xerror.Wrapf(err, xerror.DB, "postgresql: add syncer failed")
 	} else if rowNum, err := result.RowsAffected(); err != nil {
@@ -189,7 +213,7 @@ func (s *PostgresqlDB) AddSyncer(hostInfo string) error {
 
 func (s *PostgresqlDB) RefreshSyncer(hostInfo string, lastStamp int64) (int64, error) {
 	nowTime := time.Now().UnixNano()
-	refreshSql := fmt.Sprintf("UPDATE %s.syncers SET timestamp = %d WHERE host_info = '%s' AND timestamp = %d", remoteDBName, nowTime, hostInfo, lastStamp)
+	refreshSql := fmt.Sprintf("UPDATE %s.syncers SET timestamp = %d WHERE host_info = '%s' AND timestamp = %d", s.dbName, nowTime, hostInfo, lastStamp)
 	result, err := s.db.Exec(refreshSql)
 	if err != nil {
 		return -1, xerror.Wrapf(err, xerror.DB, "postgresql: refresh syncer failed.")
@@ -205,7 +229,9 @@ func (s *PostgresqlDB) RefreshSyncer(hostInfo string, lastStamp int64) (int64, e
 }
 
 func (s *PostgresqlDB) GetStampAndJobs(hostInfo string) (int64, []string, error) {
-	txn, err := s.db.BeginTx(context.Background(), &sql.TxOptions{
+	var err error
+	var txn *sql.Tx
+	txn, err = s.db.BeginTx(context.Background(), &sql.TxOptions{
 		Isolation: sql.LevelRepeatableRead,
 		ReadOnly:  true,
 	})
@@ -213,13 +239,21 @@ func (s *PostgresqlDB) GetStampAndJobs(hostInfo string) (int64, []string, error)
 		return -1, nil, xerror.Wrapf(err, xerror.DB, "postgresql: begin IMMEDIATE transaction failed.")
 	}
 
+	defer func() {
+		if err != nil {
+			log.Errorf("rebalance load failed and rollback, err: %v", err)
+			_ = txn.Rollback()
+		}
+	}()
+
 	var timestamp int64
-	if err := txn.QueryRow(fmt.Sprintf("SELECT timestamp FROM %s.syncers WHERE host_info = '%s'", remoteDBName, hostInfo)).Scan(&timestamp); err != nil {
+	if err = txn.QueryRow(fmt.Sprintf("SELECT timestamp FROM %s.syncers WHERE host_info = '%s'", s.dbName, hostInfo)).Scan(&timestamp); err != nil {
 		return -1, nil, xerror.Wrapf(err, xerror.DB, "postgresql: get stamp failed.")
 	}
 
 	jobs := make([]string, 0)
-	rows, err := s.db.Query(fmt.Sprintf("SELECT job_name FROM %s.jobs WHERE belong_to = '%s'", remoteDBName, hostInfo))
+	var rows *sql.Rows
+	rows, err = s.db.Query(fmt.Sprintf("SELECT job_name FROM %s.jobs WHERE belong_to = '%s'", s.dbName, hostInfo))
 	if err != nil {
 		return -1, nil, xerror.Wrapf(err, xerror.DB, "postgresql: get job_nums failed.")
 	}
@@ -227,13 +261,13 @@ func (s *PostgresqlDB) GetStampAndJobs(hostInfo string) (int64, []string, error)
 
 	for rows.Next() {
 		var jobName string
-		if err := rows.Scan(&jobName); err != nil {
+		if err = rows.Scan(&jobName); err != nil {
 			return -1, nil, xerror.Wrapf(err, xerror.DB, "postgresql: scan job_name failed.")
 		}
 		jobs = append(jobs, jobName)
 	}
 
-	if err := txn.Commit(); err != nil {
+	if err = txn.Commit(); err != nil {
 		return -1, nil, xerror.Wrapf(err, xerror.DB, "postgresql: get jobs & stamp txn commit failed.")
 	}
 
@@ -241,7 +275,7 @@ func (s *PostgresqlDB) GetStampAndJobs(hostInfo string) (int64, []string, error)
 }
 
 func (s *PostgresqlDB) GetDeadSyncers(expiredTime int64) ([]string, error) {
-	row, err := s.db.Query(fmt.Sprintf("SELECT host_info FROM %s.syncers WHERE timestamp < %d", remoteDBName, expiredTime))
+	row, err := s.db.Query(fmt.Sprintf("SELECT host_info FROM %s.syncers WHERE timestamp < %d", s.dbName, expiredTime))
 	if err != nil {
 		return nil, xerror.Wrapf(err, xerror.DB, "postgresql: get orphan job info failed.")
 	}
@@ -261,7 +295,7 @@ func (s *PostgresqlDB) GetDeadSyncers(expiredTime int64) ([]string, error) {
 func (s *PostgresqlDB) getOrphanJobs(txn *sql.Tx, syncers []string) ([]string, error) {
 	orphanJobs := make([]string, 0)
 	for _, deadSyncer := range syncers {
-		rows, err := txn.Query(fmt.Sprintf("SELECT job_name FROM %s.jobs WHERE belong_to = '%s'", remoteDBName, deadSyncer))
+		rows, err := txn.Query(fmt.Sprintf("SELECT job_name FROM %s.jobs WHERE belong_to = '%s'", s.dbName, deadSyncer))
 		if err != nil {
 			return nil, xerror.Wrapf(err, xerror.DB, "postgresql: get orphan jobs failed.")
 		}
@@ -275,7 +309,7 @@ func (s *PostgresqlDB) getOrphanJobs(txn *sql.Tx, syncers []string) ([]string, e
 		}
 		rows.Close()
 
-		if _, err := txn.Exec(fmt.Sprintf("DELETE FROM %s.syncers WHERE host_info = '%s'", remoteDBName, deadSyncer)); err != nil {
+		if _, err := txn.Exec(fmt.Sprintf("DELETE FROM %s.syncers WHERE host_info = '%s'", s.dbName, deadSyncer)); err != nil {
 			return nil, xerror.Wrapf(err, xerror.DB, "postgresql: delete dead syncer failed, name: %s", deadSyncer)
 		}
 	}
@@ -286,7 +320,7 @@ func (s *PostgresqlDB) getOrphanJobs(txn *sql.Tx, syncers []string) ([]string, e
 func (s *PostgresqlDB) getLoadInfo(txn *sql.Tx) (LoadSlice, int, error) {
 	load := make(LoadSlice, 0)
 	sumLoad := 0
-	host_rows, err := txn.Query(fmt.Sprintf("SELECT host_info FROM %s.syncers", remoteDBName))
+	host_rows, err := txn.Query(fmt.Sprintf("SELECT host_info FROM %s.syncers", s.dbName))
 	if err != nil {
 		return nil, -1, xerror.Wrapf(err, xerror.DB, "postgresql: get all syncers failed.")
 	}
@@ -300,7 +334,7 @@ func (s *PostgresqlDB) getLoadInfo(txn *sql.Tx) (LoadSlice, int, error) {
 	host_rows.Close()
 
 	for i := range load {
-		if err := txn.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s.jobs WHERE belong_to = '%s'", remoteDBName, load[i].HostInfo)).Scan(&load[i].NowLoad); err != nil {
+		if err := txn.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s.jobs WHERE belong_to = '%s'", s.dbName, load[i].HostInfo)).Scan(&load[i].NowLoad); err != nil {
 			return nil, -1, xerror.Wrapf(err, xerror.DB, "postgresql: get syncer %s load failed.", load[i].HostInfo)
 		}
 		sumLoad += load[i].NowLoad
@@ -311,11 +345,11 @@ func (s *PostgresqlDB) getLoadInfo(txn *sql.Tx) (LoadSlice, int, error) {
 
 func (s *PostgresqlDB) dispatchJobs(txn *sql.Tx, hostInfo string, additionalJobs []string) error {
 	for _, jobName := range additionalJobs {
-		if _, err := txn.Exec(fmt.Sprintf("UPDATE %s.jobs SET belong_to = '%s' WHERE job_name = '%s'", remoteDBName, hostInfo, jobName)); err != nil {
+		if _, err := txn.Exec(fmt.Sprintf("UPDATE %s.jobs SET belong_to = '%s' WHERE job_name = '%s'", s.dbName, hostInfo, jobName)); err != nil {
 			return xerror.Wrapf(err, xerror.DB, "postgresql: update job belong_to failed, name: %s", jobName)
 		}
 	}
-	if _, err := txn.Exec(fmt.Sprintf("UPDATE %s.syncers SET timestamp = %d WHERE host_info = '%s'", remoteDBName, time.Now().UnixNano(), hostInfo)); err != nil {
+	if _, err := txn.Exec(fmt.Sprintf("UPDATE %s.syncers SET timestamp = %d WHERE host_info = '%s'", s.dbName, time.Now().UnixNano(), hostInfo)); err != nil {
 		return xerror.Wrapf(err, xerror.DB, "postgresql: update syncer timestamp failed, host: %s", hostInfo)
 	}
 
@@ -323,7 +357,9 @@ func (s *PostgresqlDB) dispatchJobs(txn *sql.Tx, hostInfo string, additionalJobs
 }
 
 func (s *PostgresqlDB) RebalanceLoadFromDeadSyncers(syncers []string) error {
-	txn, err := s.db.BeginTx(context.Background(), &sql.TxOptions{
+	var err error
+	var txn *sql.Tx
+	txn, err = s.db.BeginTx(context.Background(), &sql.TxOptions{
 		Isolation: sql.LevelSerializable,
 		ReadOnly:  false,
 	})
@@ -331,13 +367,23 @@ func (s *PostgresqlDB) RebalanceLoadFromDeadSyncers(syncers []string) error {
 		return xerror.Wrap(err, xerror.DB, "postgresql: rebalance load begin txn failed")
 	}
 
-	orphanJobs, err := s.getOrphanJobs(txn, syncers)
+	defer func() {
+		if err != nil {
+			log.Errorf("rebalance load failed and rollback, err: %v", err)
+			_ = txn.Rollback()
+		}
+	}()
+
+	var orphanJobs []string
+	orphanJobs, err = s.getOrphanJobs(txn, syncers)
 	if err != nil {
 		return err
 	}
 
 	additionalLoad := len(orphanJobs)
-	loadList, currentLoad, err := s.getLoadInfo(txn)
+	var loadList LoadSlice
+	var currentLoad int
+	loadList, currentLoad, err = s.getLoadInfo(txn)
 	if err != nil {
 		return err
 	}
@@ -348,16 +394,13 @@ func (s *PostgresqlDB) RebalanceLoadFromDeadSyncers(syncers []string) error {
 	}
 	for i := range loadList {
 		beginIdx := additionalLoad - loadList[i].AddedLoad
-		if err := s.dispatchJobs(txn, loadList[i].HostInfo, orphanJobs[beginIdx:additionalLoad]); err != nil {
-			if err := txn.Rollback(); err != nil {
-				return xerror.Wrap(err, xerror.DB, "postgresql: rebalance rollback failed.")
-			}
+		if err = s.dispatchJobs(txn, loadList[i].HostInfo, orphanJobs[beginIdx:additionalLoad]); err != nil {
 			return err
 		}
 		additionalLoad = beginIdx
 	}
 
-	if err := txn.Commit(); err != nil {
+	if err = txn.Commit(); err != nil {
 		return xerror.Wrap(err, xerror.DB, "postgresql: rebalance txn commit failed.")
 	}
 
@@ -367,7 +410,7 @@ func (s *PostgresqlDB) RebalanceLoadFromDeadSyncers(syncers []string) error {
 func (s *PostgresqlDB) GetAllData() (map[string][]string, error) {
 	ans := make(map[string][]string)
 
-	jobRows, err := s.db.Query(fmt.Sprintf("SELECT job_name, belong_to FROM %s.jobs", remoteDBName))
+	jobRows, err := s.db.Query(fmt.Sprintf("SELECT job_name, belong_to FROM %s.jobs", s.dbName))
 	if err != nil {
 		return nil, xerror.Wrap(err, xerror.DB, "postgresql: get jobs data failed.")
 	}
@@ -383,7 +426,7 @@ func (s *PostgresqlDB) GetAllData() (map[string][]string, error) {
 	ans["jobs"] = jobData
 	jobRows.Close()
 
-	syncerRows, err := s.db.Query(fmt.Sprintf("SELECT * FROM %s.syncers", remoteDBName))
+	syncerRows, err := s.db.Query(fmt.Sprintf("SELECT * FROM %s.syncers", s.dbName))
 	if err != nil {
 		return nil, xerror.Wrap(err, xerror.DB, "postgresql: get jobs data failed.")
 	}

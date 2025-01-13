@@ -16,17 +16,11 @@
 // under the License.
 
 suite("test_ds_prop_storage_policy") {
-
-    logger.info("don't support this case, storage_policy can't be synchronized")
-    return
-
     def helper = new GroovyShell(new Binding(['suite': delegate]))
             .evaluate(new File("${context.config.suitePath}/../common", "helper.groovy"))
 
     def dbName = context.dbName
     def tableName = "tbl_" + helper.randomSuffix()
-    def test_num = 0
-    def insert_num = 5
 
     def exist = { res -> Boolean
         return res.size() != 0
@@ -121,12 +115,11 @@ suite("test_ds_prop_storage_policy") {
 
     assertTrue(helper.checkShowTimesOf("SHOW TABLES LIKE \"${tableName}\"", exist, 60, "target"))
 
-    // storage_policy should't be synchronized
-    // def res = sql "SHOW CREATE TABLE ${tableName}"
+    def res = sql "SHOW CREATE TABLE ${tableName}"
 
-    // def target_res = target_sql "SHOW CREATE TABLE ${tableName}"
+    def target_res = target_sql "SHOW CREATE TABLE ${tableName}"
 
-    // assertTrue(res[0][1].contains("\"storage_policy\" = \"${policy_name}\""))
+    assertTrue(res[0][1].contains("\"storage_policy\" = \"${policy_name}\""))
 
-    // assertTrue(!target_res[0][1].contains("\"storage_policy\" = \"${policy_name}\""))
+    assertTrue(!target_res[0][1].contains("\"storage_policy\" = \"${policy_name}\""))
 }

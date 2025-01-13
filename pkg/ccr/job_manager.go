@@ -1,3 +1,19 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License
 package ccr
 
 import (
@@ -171,17 +187,6 @@ func (jm *JobManager) runJob(job *Job) {
 	}()
 }
 
-func (jm *JobManager) GetLag(jobName string) (int64, error) {
-	jm.lock.RLock()
-	defer jm.lock.RUnlock()
-
-	if job, ok := jm.jobs[jobName]; ok {
-		return job.GetLag()
-	} else {
-		return 0, xerror.Errorf(xerror.Normal, "job not exist: %s", jobName)
-	}
-}
-
 func (jm *JobManager) dealJob(jobName string, dealFunc func(job *Job) error) error {
 	jm.lock.RLock()
 	defer jm.lock.RUnlock()
@@ -202,13 +207,6 @@ func (jm *JobManager) Pause(jobName string) error {
 func (jm *JobManager) Resume(jobName string) error {
 	return jm.dealJob(jobName, func(job *Job) error {
 		return job.Resume()
-	})
-}
-
-func (jm *JobManager) ForceFullsync(jobName string) error {
-	return jm.dealJob(jobName, func(job *Job) error {
-		job.ForceFullsync()
-		return nil
 	})
 }
 
@@ -245,12 +243,23 @@ func (jm *JobManager) ListJobs() []*JobStatus {
 	return jobs
 }
 
-func (jm *JobManager) UpdateJobSkipError(jobName string, skipError bool) error {
+func (jm *JobManager) UpdateHostMapping(jobName string, srcHostMapping, destHostMapping map[string]string) error {
 	jm.lock.Lock()
 	defer jm.lock.Unlock()
 
 	if job, ok := jm.jobs[jobName]; ok {
-		return job.UpdateSkipError(skipError)
+		return job.UpdateHostMapping(srcHostMapping, destHostMapping)
+	} else {
+		return xerror.Errorf(xerror.Normal, "job not exist: %s", jobName)
+	}
+}
+
+func (jm *JobManager) SkipBinlog(jobName string, skipCommitSeq int64, skipBy string) error {
+	jm.lock.Lock()
+	defer jm.lock.Unlock()
+
+	if job, ok := jm.jobs[jobName]; ok {
+		return job.SkipBinlog(skipCommitSeq, skipBy)
 	} else {
 		return xerror.Errorf(xerror.Normal, "job not exist: %s", jobName)
 	}

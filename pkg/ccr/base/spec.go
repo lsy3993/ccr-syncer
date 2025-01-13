@@ -1,3 +1,19 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License
 package base
 
 import (
@@ -220,6 +236,9 @@ type Spec struct {
 	Table    string `json:"table"`
 	TableId  int64  `json:"table_id"`
 
+	// The mapping of host private and public ip
+	HostMapping map[string]string `json:"host_mapping,omitempty"`
+
 	observers []utils.Observer[SpecEvent]
 }
 
@@ -263,19 +282,13 @@ func (s *Spec) Valid() error {
 	return nil
 }
 
-func (s *Spec) connect(dsn string) (*sql.DB, error) {
-	return GetMysqlDB(dsn)
-}
-
 // create mysql connection from spec
+//
+// Since the underlying connections are cached by the DSN, we do not set the DB name in the DSN.
+// The user should not set any session variables in the connections directly.
 func (s *Spec) Connect() (*sql.DB, error) {
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/", s.User, s.Password, s.Host, s.Port)
-	return s.connect(dsn)
-}
-
-func (s *Spec) ConnectDB() (*sql.DB, error) {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", s.User, s.Password, s.Host, s.Port, s.Database)
-	return s.connect(dsn)
+	return GetMysqlDB(dsn)
 }
 
 // mysql> show create database ccr;
@@ -326,42 +339,56 @@ func (s *Spec) IsDatabaseEnableBinlog() (bool, error) {
 	return strings.Contains(createDBString, binlogEnableString), nil
 }
 
-func (s *Spec) IsTableEnableBinlog() (bool, error) {
-	log.Infof("check table %s.%s enable binlog", s.Database, s.Table)
+func (s *Spec) CheckTablePropertyValid() ([]string, error) {
+	log.Infof("check table %s.%s properties valid", s.Database, s.Table)
 
 	db, err := s.Connect()
+
+	checkResult := []string{}
+
+	validProperty := []string{
+		`"binlog.enable" = "true"`,
+		`"light_schema_change" = "true"`,
+	}
+
 	if err != nil {
-		return false, err
+		return checkResult, err
 	}
 
 	var createTableString string
 	query := fmt.Sprintf("SHOW CREATE TABLE %s.%s", utils.FormatKeywordName(s.Database), utils.FormatKeywordName(s.Table))
 	rows, err := db.Query(query)
 	if err != nil {
-		return false, xerror.Wrap(err, xerror.Normal, query)
+		return checkResult, xerror.Wrap(err, xerror.Normal, query)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		rowParser := utils.NewRowParser()
 		if err := rowParser.Parse(rows); err != nil {
-			return false, xerror.Wrap(err, xerror.Normal, query)
+			return checkResult, xerror.Wrap(err, xerror.Normal, query)
 		}
 		createTableString, err = rowParser.GetString("Create Table")
 		if err != nil {
-			return false, xerror.Wrap(err, xerror.Normal, query)
+			return checkResult, xerror.Wrap(err, xerror.Normal, query)
 		}
 	}
 
 	if err := rows.Err(); err != nil {
-		return false, xerror.Wrap(err, xerror.Normal, query)
+		return checkResult, xerror.Wrap(err, xerror.Normal, query)
 	}
 
 	log.Tracef("table %s.%s create string: %s", s.Database, s.Table, createTableString)
 
-	// check "binlog.enable" = "true" in create table string
-	binlogEnableString := `"binlog.enable" = "true"`
-	return strings.Contains(createTableString, binlogEnableString), nil
+	// check valid property in create table string
+
+	for _, property := range validProperty {
+		if isValid := strings.Contains(createTableString, property); !isValid {
+			checkResult = append(checkResult, property)
+		}
+	}
+
+	return checkResult, nil
 }
 
 func (s *Spec) IsEnableRestoreSnapshotCompression() (bool, error) {
@@ -404,12 +431,13 @@ func (s *Spec) IsEnableRestoreSnapshotCompression() (bool, error) {
 func (s *Spec) GetAllTables() ([]string, error) {
 	log.Debugf("get all tables in database %s", s.Database)
 
-	db, err := s.ConnectDB()
+	db, err := s.Connect()
 	if err != nil {
 		return nil, err
 	}
 
-	rows, err := db.Query("SHOW TABLES")
+	sql := fmt.Sprintf("SHOW TABLES %s", utils.FormatKeywordName(s.Database))
+	rows, err := db.Query(sql)
 	if err != nil {
 		return nil, xerror.Wrap(err, xerror.Normal, "show tables failed")
 	}
@@ -436,7 +464,7 @@ func (s *Spec) GetAllTables() ([]string, error) {
 }
 
 func (s *Spec) queryResult(querySQL string, queryColumn string, errMsg string) ([]string, error) {
-	db, err := s.ConnectDB()
+	db, err := s.Connect()
 	if err != nil {
 		return nil, err
 	}
@@ -480,8 +508,10 @@ func (s *Spec) GetAllViewsFromTable(tableName string) ([]string, error) {
 
 	// then query view's create sql, if create sql contains tableName, this view is wanted
 	viewRegex := regexp.MustCompile("(`internal`\\.`\\w+`|`default_cluster:\\w+`)\\.`" + strings.TrimSpace(tableName) + "`")
+	dbName := utils.FormatKeywordName(s.Database)
 	for _, eachViewName := range viewsFromQuery {
-		showCreateViewSql := fmt.Sprintf("SHOW CREATE VIEW %s", eachViewName)
+		eachViewName = utils.FormatKeywordName(eachViewName)
+		showCreateViewSql := fmt.Sprintf("SHOW CREATE VIEW %s.%s", dbName, eachViewName)
 		createViewSqlList, err := s.queryResult(showCreateViewSql, "Create View", "SHOW CREATE VIEW")
 		if err != nil {
 			return nil, xerror.Wrap(err, xerror.Normal, "show create view failed")
@@ -508,7 +538,8 @@ func (s *Spec) RenameTable(destTableName string, renameTable *record.RenameTable
 	if renameTable.NewTableName != "" && renameTable.OldTableName != "" {
 		oldName := utils.FormatKeywordName(renameTable.OldTableName)
 		newName := utils.FormatKeywordName(renameTable.NewTableName)
-		sql = fmt.Sprintf("ALTER TABLE %s RENAME %s", oldName, newName)
+		dbName := utils.FormatKeywordName(s.Database)
+		sql = fmt.Sprintf("ALTER TABLE %s.%s RENAME %s", dbName, oldName, newName)
 	}
 
 	// ALTER TABLE example_table RENAME ROLLUP rollup1 rollup2;
@@ -516,7 +547,8 @@ func (s *Spec) RenameTable(destTableName string, renameTable *record.RenameTable
 	if renameTable.NewRollupName != "" && renameTable.OldRollupName != "" {
 		oldName := utils.FormatKeywordName(renameTable.OldRollupName)
 		newName := utils.FormatKeywordName(renameTable.NewRollupName)
-		sql = fmt.Sprintf("ALTER TABLE %s RENAME ROLLUP %s %s", destTableName, oldName, newName)
+		dbName := utils.FormatKeywordName(s.Database)
+		sql = fmt.Sprintf("ALTER TABLE %s.%s RENAME ROLLUP %s %s", dbName, destTableName, oldName, newName)
 	}
 
 	// ALTER TABLE example_table RENAME PARTITION p1 p2;
@@ -524,22 +556,24 @@ func (s *Spec) RenameTable(destTableName string, renameTable *record.RenameTable
 	if renameTable.NewPartitionName != "" && renameTable.OldPartitionName != "" {
 		oldName := utils.FormatKeywordName(renameTable.OldPartitionName)
 		newName := utils.FormatKeywordName(renameTable.NewPartitionName)
-		sql = fmt.Sprintf("ALTER TABLE %s RENAME PARTITION %s %s", destTableName, oldName, newName)
+		dbName := utils.FormatKeywordName(s.Database)
+		sql = fmt.Sprintf("ALTER TABLE %s.%s RENAME PARTITION %s %s", dbName, destTableName, oldName, newName)
 	}
 	if sql == "" {
 		return xerror.Errorf(xerror.Normal, "rename sql is empty")
 	}
 
 	log.Infof("rename table sql: %s", sql)
-	return s.DbExec(sql)
+	return s.Exec(sql)
 }
 
 func (s *Spec) RenameTableWithName(oldName, newName string) error {
 	oldName = utils.FormatKeywordName(oldName)
 	newName = utils.FormatKeywordName(newName)
-	sql := fmt.Sprintf("ALTER TABLE %s RENAME %s", oldName, newName)
+	dbName := utils.FormatKeywordName(s.Database)
+	sql := fmt.Sprintf("ALTER TABLE %s.%s RENAME %s", dbName, oldName, newName)
 	log.Infof("rename table sql: %s", sql)
-	return s.DbExec(sql)
+	return s.Exec(sql)
 }
 
 func (s *Spec) dropTable(table string, force bool) error {
@@ -607,15 +641,23 @@ func (s *Spec) CreateTableOrView(createTable *record.CreateTable, srcDatabase st
 		originalNameNewStyle := "`internal`.`" + strings.TrimSpace(srcDatabase) + "`."
 		originalNameOldStyle := "`default_cluster:" + strings.TrimSpace(srcDatabase) + "`." // for Doris 2.0.x
 		replaceName := "`internal`.`" + strings.TrimSpace(s.Database) + "`."
-		createTable.Sql = strings.ReplaceAll(
-			strings.ReplaceAll(createTable.Sql, originalNameNewStyle, replaceName), originalNameOldStyle, replaceName)
-		log.Debugf("original create view sql is %s, after replace, now sql is %s", createSql, createTable.Sql)
+		createSql = strings.ReplaceAll(
+			strings.ReplaceAll(createSql, originalNameNewStyle, replaceName), originalNameOldStyle, replaceName)
+		log.Debugf("original create view sql is %s, after replace, now sql is %s", createTable.Sql, createSql)
 	}
 
-	sql := createTable.Sql
-	log.Infof("create table or view sql: %s", sql)
-	// HACK: for drop table
-	return s.DbExec(sql)
+	createSql = AddDBPrefixToCreateTableOrViewSql(s.Database, createSql)
+
+	// COMMENT 'xxx' should be COMMENT "xxx" and excape content
+	createSql = ReplaceAndEscapeComment(createSql)
+
+	// Compatible with doris 2.1.x, see apache/doris#44834 for details.
+	for strings.Contains(createSql, "MAXVALUEMAXVALUE") {
+		createSql = strings.Replace(createSql, "MAXVALUEMAXVALUE", "MAXVALUE, MAXVALUE", -1)
+	}
+
+	log.Infof("create table or view sql: %s", createSql)
+	return s.Exec(createSql)
 }
 
 func (s *Spec) CheckDatabaseExists() (bool, error) {
@@ -1140,20 +1182,6 @@ func (s *Spec) Exec(sql string) error {
 	return nil
 }
 
-// Db Exec sql
-func (s *Spec) DbExec(sql string) error {
-	db, err := s.ConnectDB()
-	if err != nil {
-		return err
-	}
-
-	_, err = db.Exec(sql)
-	if err != nil {
-		return xerror.Wrapf(err, xerror.Normal, "exec sql %s failed", sql)
-	}
-	return nil
-}
-
 // impl SpecCleaner
 func (s *Spec) CleanDB() error {
 	log.Infof("clean spec %s", s.String())
@@ -1205,17 +1233,20 @@ func (s *Spec) LightningSchemaChange(srcDatabase, tableAlias string, lightningSc
 	// 1. remove database prefix
 	//   "rawSql": "ALTER TABLE `default_cluster:ccr`.`test_ddl` ADD COLUMN `nid1` int(11) NULL COMMENT \"\""
 	// replace `default_cluster:${Src.Database}`.`test_ddl` to `test_ddl`
-	var sql string
+	var match string
 	if strings.Contains(rawSql, fmt.Sprintf("`default_cluster:%s`.", srcDatabase)) {
-		sql = strings.Replace(rawSql, fmt.Sprintf("`default_cluster:%s`.", srcDatabase), "", 1)
+		match = fmt.Sprintf("`default_cluster:%s`.", srcDatabase)
 	} else {
-		sql = strings.Replace(rawSql, fmt.Sprintf("`%s`.", srcDatabase), "", 1)
+		match = fmt.Sprintf("`%s`.", srcDatabase)
 	}
+	dbName := utils.FormatKeywordName(s.Database)
+	sql := strings.Replace(rawSql, match, fmt.Sprintf("%s.", dbName), 1)
 
 	// 2. handle alias
 	if tableAlias != "" {
-		re := regexp.MustCompile("ALTER TABLE `[^`]*`")
-		sql = re.ReplaceAllString(sql, fmt.Sprintf("ALTER TABLE `%s`", tableAlias))
+		tableAlias := utils.FormatKeywordName(tableAlias)
+		re := regexp.MustCompile(fmt.Sprintf("ALTER TABLE %s.`[^`]*`", dbName))
+		sql = re.ReplaceAllString(sql, fmt.Sprintf("ALTER TABLE %s.%s", dbName, tableAlias))
 	}
 
 	// 3. compatible REPLACE_IF_NOT_NULL NULL DEFAULT "null"
@@ -1223,22 +1254,29 @@ func (s *Spec) LightningSchemaChange(srcDatabase, tableAlias string, lightningSc
 	sql = strings.Replace(sql, "REPLACE_IF_NOT_NULL NULL DEFAULT \"null\"",
 		"REPLACE_IF_NOT_NULL NULL DEFAULT NULL", 1)
 
+	sql = HandleSchemaChangeDefaultValue(sql, lightningSchemaChange)
+
 	log.Infof("lighting schema change sql, rawSql: %s, sql: %s", rawSql, sql)
-	return s.DbExec(sql)
+	return s.Exec(sql)
 }
 
 func (s *Spec) RenameColumn(destTableName string, renameColumn *record.RenameColumn) error {
-	renameSql := fmt.Sprintf("ALTER TABLE `%s` RENAME COLUMN `%s` `%s`",
-		destTableName, renameColumn.ColName, renameColumn.NewColName)
+	dbName := utils.FormatKeywordName(s.Database)
+	destTableName = utils.FormatKeywordName(destTableName)
+	renameSql := fmt.Sprintf("ALTER TABLE %s.%s RENAME COLUMN `%s` `%s`",
+		dbName, destTableName, renameColumn.ColName, renameColumn.NewColName)
 	log.Infof("rename column sql: %s", renameSql)
-	return s.DbExec(renameSql)
+	return s.Exec(renameSql)
 }
 
 func (s *Spec) ModifyComment(destTableName string, modifyComment *record.ModifyComment) error {
+	dbName := utils.FormatKeywordName(s.Database)
+	destTableName = utils.FormatKeywordName(destTableName)
+
 	var modifySql string
 	if modifyComment.Type == "COLUMN" {
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("ALTER TABLE `%s` ", destTableName))
+		sb.WriteString(fmt.Sprintf("ALTER TABLE %s.%s ", dbName, destTableName))
 		first := true
 		for col, comment := range modifyComment.ColToComment {
 			if !first {
@@ -1249,35 +1287,42 @@ func (s *Spec) ModifyComment(destTableName string, modifyComment *record.ModifyC
 		}
 		modifySql = sb.String()
 	} else if modifyComment.Type == "TABLE" {
-		modifySql = fmt.Sprintf("ALTER TABLE `%s` MODIFY COMMENT '%s'", destTableName, utils.EscapeStringValue(modifyComment.TblComment))
+		modifySql = fmt.Sprintf("ALTER TABLE %s.%s MODIFY COMMENT '%s'",
+			dbName, destTableName, utils.EscapeStringValue(modifyComment.TableComment))
 	} else {
 		return xerror.Errorf(xerror.Normal, "unsupported modify comment type: %s", modifyComment.Type)
 	}
 
 	log.Infof("modify comment sql: %s", modifySql)
-	return s.DbExec(modifySql)
+	return s.Exec(modifySql)
 }
 
 func (s *Spec) TruncateTable(destTableName string, truncateTable *record.TruncateTable) error {
+	dbName := utils.FormatKeywordName(s.Database)
+	destTableName = utils.FormatKeywordName(destTableName)
+
 	var sql string
 	if truncateTable.RawSql == "" {
-		sql = fmt.Sprintf("TRUNCATE TABLE %s", utils.FormatKeywordName(destTableName))
+		sql = fmt.Sprintf("TRUNCATE TABLE %s.%s", dbName, destTableName)
 	} else {
-		sql = fmt.Sprintf("TRUNCATE TABLE %s %s", utils.FormatKeywordName(destTableName), truncateTable.RawSql)
+		sql = fmt.Sprintf("TRUNCATE TABLE %s.%s %s", dbName, destTableName, truncateTable.RawSql)
 	}
 
 	log.Infof("truncate table sql: %s", sql)
 
-	return s.DbExec(sql)
+	return s.Exec(sql)
 }
 
 func (s *Spec) ReplaceTable(fromName, toName string, swap bool) error {
-	sql := fmt.Sprintf("ALTER TABLE %s REPLACE WITH TABLE %s PROPERTIES(\"swap\"=\"%t\")",
-		utils.FormatKeywordName(toName), utils.FormatKeywordName(fromName), swap)
+	dbName := utils.FormatKeywordName(s.Database)
+	toName = utils.FormatKeywordName(toName)
+	fromName = utils.FormatKeywordName(fromName)
+	sql := fmt.Sprintf("ALTER TABLE %s.%s REPLACE WITH TABLE %s PROPERTIES(\"swap\"=\"%t\")",
+		dbName, toName, fromName, swap)
 
 	log.Infof("replace table sql: %s", sql)
 
-	return s.DbExec(sql)
+	return s.Exec(sql)
 }
 
 func (s *Spec) DropTable(tableName string, force bool) error {
@@ -1285,15 +1330,19 @@ func (s *Spec) DropTable(tableName string, force bool) error {
 	if force {
 		sqlSuffix = "FORCE"
 	}
-	dropSql := fmt.Sprintf("DROP TABLE %s %s", utils.FormatKeywordName(tableName), sqlSuffix)
+	dbName := utils.FormatKeywordName(s.Database)
+	tableName = utils.FormatKeywordName(tableName)
+	dropSql := fmt.Sprintf("DROP TABLE %s.%s %s", dbName, tableName, sqlSuffix)
 	log.Infof("drop table sql: %s", dropSql)
-	return s.DbExec(dropSql)
+	return s.Exec(dropSql)
 }
 
 func (s *Spec) DropView(viewName string) error {
-	dropView := fmt.Sprintf("DROP VIEW IF EXISTS %s ", utils.FormatKeywordName(viewName))
+	dbName := utils.FormatKeywordName(s.Database)
+	viewName = utils.FormatKeywordName(viewName)
+	dropView := fmt.Sprintf("DROP VIEW IF EXISTS %s.%s ", dbName, viewName)
 	log.Infof("drop view sql: %s", dropView)
-	return s.DbExec(dropView)
+	return s.Exec(dropView)
 }
 
 func (s *Spec) AlterViewDef(srcDatabase, viewName string, alterView *record.AlterView) error {
@@ -1306,66 +1355,81 @@ func (s *Spec) AlterViewDef(srcDatabase, viewName string, alterView *record.Alte
 	//	FROM `internal`.`regression_test_db_sync_view_alter`.`tbl_duplicate_0_1159493057`
 	var def string
 	prefix := fmt.Sprintf("`internal`.`%s`.", srcDatabase)
-	if strings.Contains(alterView.InlineViewDef, prefix) {
-		def = strings.ReplaceAll(alterView.InlineViewDef, prefix, "")
-	} else {
+	if !strings.Contains(alterView.InlineViewDef, prefix) {
 		prefix = fmt.Sprintf(" `%s`.", srcDatabase)
-		def = strings.ReplaceAll(alterView.InlineViewDef, prefix, " ")
 	}
+	dbName := utils.FormatKeywordName(s.Database)
+	def = strings.ReplaceAll(alterView.InlineViewDef, prefix, fmt.Sprintf(" %s.", dbName))
 
 	viewName = utils.FormatKeywordName(viewName)
-	alterViewSql := fmt.Sprintf("ALTER VIEW %s AS %s", viewName, def)
+	alterViewSql := fmt.Sprintf("ALTER VIEW %s.%s AS %s", dbName, viewName, def)
 	log.Infof("alter view sql: %s", alterViewSql)
-	return s.DbExec(alterViewSql)
+	return s.Exec(alterViewSql)
 }
 
 func (s *Spec) AddPartition(destTableName string, addPartition *record.AddPartition) error {
-	addPartitionSql := addPartition.GetSql(destTableName)
+	addPartitionSql := addPartition.GetSql(s.Database, destTableName)
 	addPartitionSql = correctAddPartitionSql(addPartitionSql, addPartition)
 	log.Infof("add partition sql: %s, original sql: %s", addPartitionSql, addPartition.Sql)
-	return s.DbExec(addPartitionSql)
+	return s.Exec(addPartitionSql)
 }
 
 func (s *Spec) DropPartition(destTableName string, dropPartition *record.DropPartition) error {
+	dbName := utils.FormatKeywordName(s.Database)
 	destTableName = utils.FormatKeywordName(destTableName)
-	dropPartitionSql := fmt.Sprintf("ALTER TABLE %s %s", destTableName, dropPartition.Sql)
+	dropPartitionSql := fmt.Sprintf("ALTER TABLE %s.%s %s", dbName, destTableName, dropPartition.Sql)
 	log.Infof("drop partition sql: %s", dropPartitionSql)
-	return s.DbExec(dropPartitionSql)
+	return s.Exec(dropPartitionSql)
 }
 
 func (s *Spec) RenamePartition(destTableName, oldPartition, newPartition string) error {
+	dbName := utils.FormatKeywordName(s.Database)
 	destTableName = utils.FormatKeywordName(destTableName)
 	oldPartition = utils.FormatKeywordName(oldPartition)
 	newPartition = utils.FormatKeywordName(newPartition)
-	renamePartitionSql := fmt.Sprintf("ALTER TABLE %s RENAME PARTITION %s %s",
-		destTableName, oldPartition, newPartition)
+	renamePartitionSql := fmt.Sprintf("ALTER TABLE %s.%s RENAME PARTITION %s %s",
+		dbName, destTableName, oldPartition, newPartition)
 	log.Infof("rename partition sql: %s", renamePartitionSql)
-	return s.DbExec(renamePartitionSql)
+	return s.Exec(renamePartitionSql)
 }
 
 func (s *Spec) LightningIndexChange(alias string, record *record.ModifyTableAddOrDropInvertedIndices) error {
 	rawSql := record.GetRawSql()
-	if len(record.AlternativeIndexes) != 1 {
-		return xerror.Errorf(xerror.Normal, "lightning index change job has more than one index, should not be here")
+	if len(record.AlternativeIndexes) == 0 {
+		return xerror.Errorf(xerror.Normal, "lightning index change job is empty, should not be here")
 	}
 
-	index := record.AlternativeIndexes[0]
-	if !index.IsInvertedIndex() {
-		return xerror.Errorf(xerror.Normal, "lightning index change job is not inverted index, should not be here")
-	}
-
-	sql := fmt.Sprintf("ALTER TABLE %s", utils.FormatKeywordName(alias))
+	dbName := utils.FormatKeywordName(s.Database)
+	alias = utils.FormatKeywordName(alias)
+	sql := fmt.Sprintf("ALTER TABLE %s.%s", dbName, alias)
 	if record.IsDropInvertedIndex {
-		sql = fmt.Sprintf("%s DROP INDEX %s", sql, utils.FormatKeywordName(index.GetIndexName()))
+		dropIndexes := []string{}
+		for _, index := range record.AlternativeIndexes {
+			if !index.IsInvertedIndex() {
+				return xerror.Errorf(xerror.Normal, "lightning index change job is not inverted index, should not be here")
+			}
+			indexName := utils.FormatKeywordName(index.GetIndexName())
+			dropIndexes = append(dropIndexes, fmt.Sprintf("DROP INDEX %s", indexName))
+		}
+		sql = fmt.Sprintf("%s %s", sql, strings.Join(dropIndexes, ", "))
 	} else {
-		columns := index.GetColumns()
-		columnsRef := fmt.Sprintf("(`%s`)", strings.Join(columns, "`,`"))
-		sql = fmt.Sprintf("%s ADD INDEX %s %s USING INVERTED COMMENT '%s'",
-			sql, utils.FormatKeywordName(index.GetIndexName()), columnsRef, index.GetComment())
+		addIndexes := []string{}
+		for _, index := range record.AlternativeIndexes {
+			if !index.IsInvertedIndex() {
+				return xerror.Errorf(xerror.Normal, "lightning index change job is not inverted index, should not be here")
+			}
+			columns := index.GetColumns()
+			columnsRef := fmt.Sprintf("(`%s`)", strings.Join(columns, "`,`"))
+			indexName := utils.FormatKeywordName(index.GetIndexName())
+			addIndex := fmt.Sprintf("ADD INDEX %s %s USING INVERTED COMMENT '%s'",
+				indexName, columnsRef, index.GetComment())
+			addIndexes = append(addIndexes, addIndex)
+		}
+		sql = fmt.Sprintf("%s %s", sql, strings.Join(addIndexes, ", "))
 	}
 
 	log.Infof("lighting index change sql, rawSql: %s, sql: %s", rawSql, sql)
-	return s.DbExec(sql)
+	return s.Exec(sql)
 }
 
 func (s *Spec) BuildIndex(tableAlias string, buildIndex *record.IndexChangeJob) error {
@@ -1379,14 +1443,15 @@ func (s *Spec) BuildIndex(tableAlias string, buildIndex *record.IndexChangeJob) 
 
 	index := buildIndex.Indexes[0]
 	indexName := index.GetIndexName()
-	sql := fmt.Sprintf("BUILD INDEX %s ON %s",
-		utils.FormatKeywordName(indexName), utils.FormatKeywordName(tableAlias))
-
+	indexName = utils.FormatKeywordName(indexName)
+	tableAlias = utils.FormatKeywordName(tableAlias)
+	dbName := utils.FormatKeywordName(s.Database)
+	sql := fmt.Sprintf("BUILD INDEX %s ON %s.%s", indexName, dbName, tableAlias)
 	if buildIndex.PartitionName != "" {
 		sqlWithPart := fmt.Sprintf("%s PARTITION (%s)", sql, utils.FormatKeywordName(buildIndex.PartitionName))
 
 		log.Infof("build index sql: %s", sqlWithPart)
-		err := s.DbExec(sqlWithPart)
+		err := s.Exec(sqlWithPart)
 		if err == nil {
 			return nil
 		} else if !strings.Contains(err.Error(), "is not partitioned, cannot build index with partitions") {
@@ -1397,35 +1462,39 @@ func (s *Spec) BuildIndex(tableAlias string, buildIndex *record.IndexChangeJob) 
 	}
 
 	log.Infof("build index sql: %s", sql)
-	return s.DbExec(sql)
+	return s.Exec(sql)
 }
 
 func (s *Spec) RenameRollup(destTableName, oldRollup, newRollup string) error {
+	dbName := utils.FormatKeywordName(s.Database)
 	destTableName = utils.FormatKeywordName(destTableName)
 	oldRollup = utils.FormatKeywordName(oldRollup)
 	newRollup = utils.FormatKeywordName(newRollup)
-	renameRollupSql := fmt.Sprintf("ALTER TABLE %s RENAME ROLLUP %s %s",
-		destTableName, oldRollup, newRollup)
+	renameRollupSql := fmt.Sprintf("ALTER TABLE %s.%s RENAME ROLLUP %s %s",
+		dbName, destTableName, oldRollup, newRollup)
 	log.Infof("rename rollup sql: %s", renameRollupSql)
-	return s.DbExec(renameRollupSql)
+	return s.Exec(renameRollupSql)
 }
 
 func (s *Spec) DropRollup(destTableName, rollup string) error {
+	dbName := utils.FormatKeywordName(s.Database)
 	destTableName = utils.FormatKeywordName(destTableName)
 	rollup = utils.FormatKeywordName(rollup)
-	dropRollupSql := fmt.Sprintf("ALTER TABLE %s DROP ROLLUP %s", destTableName, rollup)
+	dropRollupSql := fmt.Sprintf("ALTER TABLE %s.%s DROP ROLLUP %s", dbName, destTableName, rollup)
 	log.Infof("drop rollup sql: %s", dropRollupSql)
-	return s.DbExec(dropRollupSql)
+	return s.Exec(dropRollupSql)
 }
 
 func (s *Spec) DesyncTables(tables ...string) error {
 	var err error
 
 	failedTables := []string{}
+	dbName := utils.FormatKeywordName(s.Database)
 	for _, table := range tables {
-		desyncSql := fmt.Sprintf("ALTER TABLE %s SET (\"is_being_synced\"=\"false\")", utils.FormatKeywordName(table))
-		log.Debugf("db exec sql: %s", desyncSql)
-		if err = s.DbExec(desyncSql); err != nil {
+		table = utils.FormatKeywordName(table)
+		desyncSql := fmt.Sprintf("ALTER TABLE %s.%s SET (\"is_being_synced\"=\"false\")", dbName, table)
+		log.Debugf("exec sql: %s", desyncSql)
+		if err = s.Exec(desyncSql); err != nil {
 			failedTables = append(failedTables, table)
 		}
 	}
@@ -1435,6 +1504,28 @@ func (s *Spec) DesyncTables(tables ...string) error {
 	}
 
 	return nil
+}
+
+func (s *Spec) ModifyTableProperty(destTableName string, modifyProperty *record.ModifyTableProperty) error {
+	dbName := utils.FormatKeywordName(s.Database)
+	destTableName = utils.FormatKeywordName(destTableName)
+	modifyProperty.Sql = strings.ReplaceAll(modifyProperty.Sql, "\u003d", "=")
+
+	supportedProperties := FilterUnsupportedProperties(modifyProperty)
+	if len(supportedProperties) == 0 {
+		log.Warnf("the whole table properties are invalid, skip modify table property")
+		return nil
+	}
+
+	kvs := make([]string, 0, len(supportedProperties))
+	for k, v := range supportedProperties {
+		kvs = append(kvs, fmt.Sprintf("\"%s\"=\"%s\"", k, v))
+	}
+
+	sql := fmt.Sprintf("ALTER TABLE %s.%s SET (%s)", dbName, destTableName, strings.Join(kvs, ", "))
+	log.Infof("modify table property sql: %s", sql)
+
+	return s.Exec(sql)
 }
 
 // Determine whether the error are network related, eg connection refused, connection reset, exposed from net packages.
@@ -1474,4 +1565,66 @@ func correctAddPartitionSql(addPartitionSql string, addPartition *record.AddPart
 		addPartitionSql = strings.ReplaceAll(addPartitionSql, "ADD PARTITION", "ADD TEMPORARY PARTITION")
 	}
 	return addPartitionSql
+}
+
+func AddDBPrefixToCreateTableOrViewSql(dbName, createSql string) string {
+	// extract table/view name from create sql, and add db prefix
+	re := regexp.MustCompile("^\\s*CREATE\\s+(VIEW|TABLE)\\s+`([^`]+)`\\s+")
+	matches := re.FindStringSubmatch(createSql)
+	if len(matches) == 3 {
+		resource := matches[1]
+		viewName := utils.FormatKeywordName(matches[2])
+		dbName := utils.FormatKeywordName(dbName)
+		createSql = re.ReplaceAllString(createSql,
+			fmt.Sprintf("CREATE %s %s.%s ", resource, dbName, viewName))
+	}
+	return createSql
+}
+
+func ReplaceAndEscapeComment(input string) string {
+	re := regexp.MustCompile(`COMMENT '(.*?)'`)
+
+	return re.ReplaceAllStringFunc(input, func(match string) string {
+		groups := re.FindStringSubmatch(match)
+		if len(groups) < 2 {
+			return match
+		}
+		content := strings.ReplaceAll(groups[1], `"`, `\"`)
+		return fmt.Sprintf(`COMMENT "%s"`, content)
+	})
+}
+
+func FilterUnsupportedProperties(modifyProperty *record.ModifyTableProperty) map[string]string {
+	invalidProps := map[string]struct{}{
+		"binlog.enable":            {},
+		"light_schema_change":      {},
+		"dynamic_partition.enable": {},
+		"colocate_with":            {},
+		"storage_policy":           {},
+		"replication_num":          {},
+		"replication_allocation":   {},
+		"is_being_synced":          {},
+	}
+	validProperties := make(map[string]string)
+	for prop, value := range modifyProperty.Properties {
+		if _, exists := invalidProps[prop]; !exists {
+			validProperties[prop] = value
+		}
+	}
+	return validProperties
+}
+
+func HandleSchemaChangeDefaultValue(sql string, lightningSchemaChange *record.ModifyTableAddOrDropColumns) string {
+	indexSchemaMap := lightningSchemaChange.IndexSchemaMap[lightningSchemaChange.TableId]
+
+	for _, columnSchema := range indexSchemaMap {
+		if columnSchema.Type.Type != "VARCHAR" && columnSchema.DefaultValue != "" {
+			if columnSchema.DefaultValue == "CURRENT_TIMESTAMP" {
+				sql = strings.ReplaceAll(sql, "DEFAULT \"CURRENT_TIMESTAMP\"", "DEFAULT CURRENT_TIMESTAMP")
+			} else if columnSchema.DefaultValue == "BITMAP_EMPTY_DEFAULT_VALUE" {
+				sql = strings.ReplaceAll(sql, "DEFAULT \"BITMAP_EMPTY_DEFAULT_VALUE\"", "DEFAULT BITMAP_EMPTY_DEFAULT_VALUE")
+			}
+		}
+	}
+	return sql
 }
